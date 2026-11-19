@@ -1,0 +1,23 @@
+# Python & Virtual Environment
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Node & Next.js
+node_modules/
+frontend/.next/
+frontend/out/
+.next/
+
+# Environment Secrets & Local Databases
+.env
+.env.local
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated / Temporary Files
+data/exported_docx/
+*.log

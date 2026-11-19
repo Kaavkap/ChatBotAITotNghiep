@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+langchain
+llama-index
+pydantic
+pdfplumber
+qdrant-client
+openai
+python-dotenv
+python-docx
+cohere
+gTTS
+edge-tts
+
