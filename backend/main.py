@@ -199,14 +199,19 @@ class TTSRequest(BaseModel):
 
 
 class GoogleAuthVerifyRequest(BaseModel):
-    """Payload xác thực đăng nhập Google OAuth & kiểm tra Domain Guard `@student.tdmu.edu.vn`."""
+    """Payload xác thực Google OAuth ID Token (`credential`) & kiểm tra Domain Guard `@student.tdmu.edu.vn`."""
 
-    email: Optional[str] = Field(default=None, description="Email Google của người dùng")
-    full_name: Optional[str] = Field(default=None, description="Họ và tên người dùng từ Google")
-    avatar_url: Optional[str] = Field(default=None, description="URL ảnh đại diện Google")
+    credential: Optional[str] = Field(
+        default=None,
+        description="Chuỗi JWT ID Token trả về từ Google Identity Services (Continue with Google)",
+    )
     google_credential: Optional[str] = Field(
         default=None,
-        description="Chuỗi JWT ID Token trả về từ Google Identity Services (nếu có)",
+        description="Alias tương thích cho chuỗi JWT ID Token từ Google Identity Services",
+    )
+    access_token: Optional[str] = Field(
+        default=None,
+        description="Google OAuth2 Access Token (nếu đăng nhập qua luồng popup OAuth2 Token Client)",
     )
 
 
@@ -437,25 +442,79 @@ async def text_to_speech_vietnamese(request: TTSRequest):
     )
 
 
-def _require_authenticated_tdmu_user(
+def require_tdmu_admin(
     x_user_email: Optional[str] = None,
 ) -> tuple[str, str]:
     """
-    Kiểm tra quyền truy cập Quản trị (`/api/admin/analytics`, `/api/ingest`):
-    - Yêu cầu header `X-User-Email` thuộc miền `@student.tdmu.edu.vn`.
-    - Nếu không có hoặc thuộc tài khoản Khách (Guest), trả về lỗi `403 Forbidden`.
+    Kiểm tra quyền Quản trị viên tối cao (`require_tdmu_admin`) cho `/api/admin/analytics` và `/api/ingest`:
+    - Chỉ cho phép duy nhất tài khoản nằm trong `settings.admin_emails` (`2224801030361@student.tdmu.edu.vn`).
+    - Mọi tài khoản khác (kể cả sinh viên TDMU khác hoặc Khách) đều bị chặn với mã `403 Forbidden`.
     """
     cleaned_email = (x_user_email or "").strip().lower()
-    is_valid, student_id, reason = verify_tdmu_email_domain(cleaned_email)
-    if not is_valid:
+    allowed_admins = {e.strip().lower() for e in settings.admin_emails if e.strip()}
+
+    if not cleaned_email:
         raise HTTPException(
             status_code=403,
             detail=(
-                "Truy cập bị từ chối (403 Forbidden): Chức năng Quản trị & Thống kê chỉ dành cho "
-                f"tài khoản đã xác thực thuộc tên miền @student.tdmu.edu.vn. ({reason})"
+                "Truy cập bị từ chối (403 Forbidden): Bạn chưa đăng nhập tài khoản Quản trị viên TDMU."
+            ),
+        )
+
+    is_valid, student_id, reason = verify_tdmu_email_domain(cleaned_email)
+    if not is_valid or cleaned_email not in allowed_admins:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Truy cập bị từ chối (403 Forbidden): Quyền Quản trị & Thống kê chỉ cấp duy nhất cho "
+                f"Quản trị viên hệ thống ({', '.join(sorted(allowed_admins))}). Tài khoản '{cleaned_email}' không có quyền truy cập."
             ),
         )
     return cleaned_email, student_id
+
+
+def _verify_google_oauth_token_payload(
+    raw_id_token: Optional[str] = None,
+    raw_access_token: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Xác thực chữ ký thật của Google OAuth Token thông qua `google.oauth2.id_token.verify_oauth2_token`
+    (hoặc Google UserInfo Endpoint khi dùng OAuth2 Access Token):
+    - Kiểm tra chữ ký số của Google (`accounts.google.com` / `https://accounts.google.com`).
+    - Kiểm tra `email_verified == True`.
+    """
+    from google.auth.transport import requests as google_requests
+    from google.oauth2 import id_token as google_id_token
+
+    token_str = (raw_id_token or "").strip()
+    if token_str:
+        client_id = settings.google_client_id.strip() or None
+        request_adapter = google_requests.Request()
+        id_info = google_id_token.verify_oauth2_token(
+            token_str,
+            request_adapter,
+            audience=client_id,
+            clock_skew_in_seconds=60,
+        )
+        issuer = str(id_info.get("iss") or "")
+        if issuer not in ("accounts.google.com", "https://accounts.google.com"):
+            raise ValueError("Token issuer không hợp lệ (không phải từ Google).")
+        return dict(id_info)
+
+    access_tok = (raw_access_token or "").strip()
+    if access_tok:
+        import requests as std_requests
+
+        resp = std_requests.get(
+            "https://www.googleapis.com/oauth2/v3/userinfo",
+            headers={"Authorization": f"Bearer {access_tok}"},
+            timeout=5,
+        )
+        if resp.status_code != 200:
+            raise ValueError("Google Access Token không hợp lệ hoặc đã hết hạn.")
+        return dict(resp.json())
+
+    raise ValueError("Thiếu Google OAuth ID Token (`credential`).")
 
 
 def _extract_upload_from_request(
@@ -680,15 +739,15 @@ async def ingest_regulations(
     x_user_email: Optional[str] = Header(
         default=None,
         alias="X-User-Email",
-        description="Email xác thực sinh viên/quản trị viên TDMU (@student.tdmu.edu.vn)",
+        description="Email xác thực Quản trị viên TDMU (2224801030361@student.tdmu.edu.vn)",
     ),
 ):
     """
     Quét toàn bộ PDF và DOCX trong `data/raw_pdfs` (hoặc lưu thêm file mới được tải lên từ trang Quản trị `/admin`),
     bóc tách văn bản & bảng biểu, chia chunk phân cấp và nạp vào Qdrant.
-    Bắt buộc xác thực header `X-User-Email` thuộc miền `@student.tdmu.edu.vn` (trả về 403 nếu ở chế độ Khách).
+    Chỉ cho phép tài khoản Quản trị viên (`2224801030361@student.tdmu.edu.vn`) thực thi.
     """
-    _require_authenticated_tdmu_user(x_user_email)
+    require_tdmu_admin(x_user_email)
 
     global INITIAL_CHUNKS_COUNT, LOADED_CHUNK_FILES, DOCUMENT_CHUNK_COUNTS
     import json
@@ -804,54 +863,82 @@ async def ingest_regulations(
 @app.post("/api/auth/google")
 async def verify_google_oauth(request: GoogleAuthVerifyRequest):
     """
-    Endpoint xác thực Google OAuth & kiểm tra Domain Guard `@student.tdmu.edu.vn`:
-    - Tự động giải mã JWT credential từ Google Identity Services (nếu có) hoặc nhận email/full_name.
-    - Chỉ cho phép tài khoản có đuôi `@student.tdmu.edu.vn` kích hoạt chế độ Sinh viên TDMU (lưu lịch sử).
-    - Tự động bóc tách MSSV từ tiền tố email và lưu vào bảng `users` trong SQLite.
-    - Nếu email ngoài tên miền hoặc trống: trả về `is_tdmu_student = False` (Chế độ Khách / Guest).
+    Endpoint xác thực Google OAuth thực tế (`POST /api/auth/google`):
+    - Nhận `credential` (Google OAuth ID Token JWT) từ Google Identity Services phía Frontend.
+    - Dùng `google.oauth2.id_token.verify_oauth2_token(...)` để xác thực chữ ký số thật từ Google.
+    - Kiểm tra `email_verified == True` và bắt buộc email kết thúc bằng `@student.tdmu.edu.vn`
+      (từ chối các tài khoản `@gmail.com` ngoài trường bằng mã lỗi `403 Forbidden`).
+    - Trả về thông tin người dùng thật từ Google (`email`, `full_name`, `student_id`, `picture`,
+      và cờ `is_admin: email.lower() in settings.admin_emails`).
     """
-    email = (request.email or "").strip().lower()
-    full_name = (request.full_name or "").strip()
-    avatar_url = (request.avatar_url or "").strip()
+    raw_token = (request.credential or request.google_credential or "").strip()
+    raw_access_token = (request.access_token or "").strip()
 
-    if request.google_credential:
-        decoded = decode_google_jwt_credential(request.google_credential)
-        if decoded:
-            email = str(decoded.get("email") or email).strip().lower()
-            full_name = str(decoded.get("name") or full_name).strip()
-            avatar_url = str(decoded.get("picture") or avatar_url).strip()
+    if not raw_token and not raw_access_token:
+        raise HTTPException(
+            status_code=400,
+            detail="Không tìm thấy Google OAuth ID Token (credential). Vui lòng đăng nhập qua nút 'Continue with Google'.",
+        )
 
-    is_valid, student_id, message = verify_tdmu_email_domain(email)
+    try:
+        id_info = _verify_google_oauth_token_payload(
+            raw_id_token=raw_token,
+            raw_access_token=raw_access_token,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=401,
+            detail=f"Xác thực chữ ký Google OAuth Token thất bại: {exc}",
+        ) from exc
 
-    if not is_valid:
-        return {
-            "authenticated": False,
-            "is_tdmu_student": False,
-            "mode": "guest",
-            "email": email or None,
-            "student_id": None,
-            "full_name": full_name or "Khách (Guest)",
-            "avatar_url": avatar_url or None,
-            "persistence_enabled": False,
-            "message": message,
-        }
+    email = str(id_info.get("email") or "").strip().lower()
+    email_verified = bool(id_info.get("email_verified", False))
+    full_name = str(id_info.get("name") or "").strip()
+    picture = str(id_info.get("picture") or "").strip()
+
+    if not email or not email_verified:
+        raise HTTPException(
+            status_code=403,
+            detail="Tài khoản Google chưa được xác minh email (email_verified = False).",
+        )
+
+    is_valid_domain, student_id, domain_msg = verify_tdmu_email_domain(email)
+    if not is_valid_domain:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"Từ chối đăng nhập (403 Forbidden): Tài khoản '{email}' không thuộc tên miền sinh viên "
+                "Trường Đại học Thủ Dầu Một (@student.tdmu.edu.vn). Vui lòng chọn đúng tài khoản Google sinh viên TDMU."
+            ),
+        )
+
+    allowed_admins = {e.strip().lower() for e in settings.admin_emails if e.strip()}
+    is_admin = email in allowed_admins
 
     user_record = chat_db.get_or_create_tdmu_user(email=email, full_name=full_name)
     resolved_name = (
-        user_record["full_name"] if user_record else (full_name or f"Sinh viên TDMU ({student_id})")
+        user_record["full_name"]
+        if user_record
+        else (full_name or f"Sinh viên TDMU ({student_id})")
     )
 
     return {
         "authenticated": True,
         "is_tdmu_student": True,
-        "mode": "tdmu_student",
+        "is_admin": is_admin,
+        "mode": "tdmu_admin" if is_admin else "tdmu_student",
         "user_id": user_record["id"] if user_record else None,
         "email": email,
         "student_id": student_id,
         "full_name": resolved_name,
-        "avatar_url": avatar_url or None,
+        "picture": picture or None,
+        "avatar_url": picture or None,
         "persistence_enabled": True,
-        "message": message,
+        "message": (
+            f"{domain_msg} (Quyền Quản trị viên Hệ thống TDMU)"
+            if is_admin
+            else domain_msg
+        ),
     }
 
 
@@ -957,18 +1044,15 @@ async def get_admin_analytics(
     x_user_email: Optional[str] = Header(
         default=None,
         alias="X-User-Email",
-        description="Email xác thực sinh viên/quản trị viên TDMU (@student.tdmu.edu.vn)",
+        description="Email xác thực Quản trị viên TDMU (2224801030361@student.tdmu.edu.vn)",
     ),
 ):
     """
     Endpoint Thống kê Quản trị & Đánh giá Mức độ Hài lòng (`GET /api/admin/analytics`):
-    - Yêu cầu header `X-User-Email` thuộc miền `@student.tdmu.edu.vn` (trả về 403 Forbidden nếu truy cập ở Chế độ Khách).
-    - Tổng số văn bản quy chế chính thức & tổng số chunks đang hoạt động trong Qdrant.
-    - Tổng số câu hỏi đã xử lý, tổng số người dùng & phiên hội thoại.
-    - Tỷ lệ hài lòng (`👍 Hữu ích` / `👎 Chưa chính xác`).
-    - Thống kê nhóm chủ đề sinh viên hỏi nhiều nhất (`Quy chế đào tạo`, `Học bổng`, `Chuẩn đầu ra ngoại ngữ`, `Ngoài phạm vi`).
+    - Chỉ cho phép duy nhất tài khoản Quản trị viên nằm trong `settings.admin_emails` (`2224801030361@student.tdmu.edu.vn`).
+    - Mọi tài khoản khác (kể cả sinh viên TDMU khác hoặc Khách) đều bị chặn với mã `403 Forbidden`.
     """
-    verified_email, verified_mssv = _require_authenticated_tdmu_user(x_user_email)
+    verified_email, verified_mssv = require_tdmu_admin(x_user_email)
     db_stats = chat_db.get_admin_analytics_summary()
     raw_dir = Path(settings.raw_pdfs_dir)
     active_docs = []

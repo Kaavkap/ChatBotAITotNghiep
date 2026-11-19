@@ -38,6 +38,14 @@ class Settings(BaseModel):
     sqlite_db_path: Path = BASE_DIR / "data" / "tdmu_chat_history.db"
     allowed_email_domain: str = "@student.tdmu.edu.vn"
 
+    # Google OAuth & TDMU Admin Configuration
+    google_client_id: str = (
+        os.getenv("GOOGLE_CLIENT_ID")
+        or os.getenv("NEXT_PUBLIC_GOOGLE_CLIENT_ID")
+        or ""
+    ).strip()
+    admin_emails: list[str] = ["2224801030361@student.tdmu.edu.vn"]
+
 
 settings = Settings()
 

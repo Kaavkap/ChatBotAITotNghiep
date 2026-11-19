@@ -11,4 +11,6 @@ python-docx
 cohere
 gTTS
 edge-tts
+google-auth
+requests
 

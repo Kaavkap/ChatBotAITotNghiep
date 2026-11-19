@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.main import (
     ChatRequest,
+    GoogleAuthVerifyRequest,
     MessageFeedbackRequest,
     TTSRequest,
     chat_academic,
@@ -20,6 +21,7 @@ from backend.main import (
     speech_to_text_endpoint,
     submit_message_feedback,
     text_to_speech_vietnamese,
+    verify_google_oauth,
 )
 from backend.parsers.docx_extractor import (
     export_pdf_to_clean_docx,
@@ -120,27 +122,97 @@ async def run_verification() -> None:
     assert hit_ms < 5.0, f"Thời gian phản hồi LRU Cache phải < 5ms, nhận {hit_ms:.3f}ms"
 
     print("\n" + "=" * 88)
-    print("3. KIỂM THỬ PHÂN QUYỀN GUEST BLOCKER (403 FORBIDDEN) & ADMIN ANALYTICS")
+    print("3. KIỂM THỬ XÁC THỰC GOOGLE OAUTH ID TOKEN & PHÂN QUYỀN DUY NHẤT ADMIN (2224801030361)")
     print("=" * 88)
+    from unittest.mock import patch
 
-    # 3.1. Kiểm thử truy cập /api/admin/analytics ở Chế độ Khách (không có X-User-Email hoặc Gmail ngoài) -> Phải bị chặn 403
-    blocked_guest = False
+    # 3.0. Kiểm thử verify_google_oauth:
+    # (a) Không truyền credential -> HTTP 400
+    missing_cred = False
     try:
-        await get_admin_analytics(x_user_email=None)
+        await verify_google_oauth(GoogleAuthVerifyRequest())
     except HTTPException as exc:
-        print(f"  [+] Chặn Guest (x_user_email=None) thành công -> HTTP {exc.status_code}: {exc.detail}")
-        assert exc.status_code == 403
-        blocked_guest = True
-    assert blocked_guest, "Guest không có X-User-Email phải bị chặn 403 Forbidden!"
+        print(f"  [+] Chặn request thiếu Google ID Token -> HTTP {exc.status_code}: {exc.detail}")
+        assert exc.status_code == 400
+        missing_cred = True
+    assert missing_cred
 
-    blocked_external = False
-    try:
-        await get_admin_analytics(x_user_email="sinhvienngoai@gmail.com")
-    except HTTPException as exc:
-        print(f"  [+] Chặn Email ngoài (@gmail.com) thành công -> HTTP {exc.status_code}")
-        assert exc.status_code == 403
-        blocked_external = True
-    assert blocked_external, "Email ngoài @student.tdmu.edu.vn phải bị chặn 403 Forbidden!"
+    # (b) Token từ tài khoản @gmail.com cá nhân -> HTTP 403 Forbidden
+    with patch("google.oauth2.id_token.verify_oauth2_token") as mock_verify:
+        mock_verify.return_value = {
+            "iss": "https://accounts.google.com",
+            "email": "nguoila@gmail.com",
+            "email_verified": True,
+            "name": "Người Lạ",
+        }
+        gmail_blocked = False
+        try:
+            await verify_google_oauth(
+                GoogleAuthVerifyRequest(credential="fake_gmail_jwt_token")
+            )
+        except HTTPException as exc:
+            print(f"  [+] Chặn Google Token @gmail.com -> HTTP {exc.status_code}: {exc.detail}")
+            assert exc.status_code == 403
+            gmail_blocked = True
+        assert gmail_blocked
+
+    # (c) Token từ sinh viên TDMU khác (2224801030999@student.tdmu.edu.vn) -> Thành công nhưng is_admin = False
+    with patch("google.oauth2.id_token.verify_oauth2_token") as mock_verify:
+        mock_verify.return_value = {
+            "iss": "https://accounts.google.com",
+            "email": "2224801030999@student.tdmu.edu.vn",
+            "email_verified": True,
+            "name": "Sinh Viên Khác",
+            "picture": "https://lh3.googleusercontent.com/a/default-user",
+        }
+        other_sv_res = await verify_google_oauth(
+            GoogleAuthVerifyRequest(credential="valid_other_sv_jwt_token")
+        )
+        print(
+            f"  [+] Sinh viên TDMU khác ({other_sv_res['email']}): "
+            f"authenticated={other_sv_res['authenticated']}, is_admin={other_sv_res['is_admin']}"
+        )
+        assert other_sv_res["authenticated"] is True
+        assert other_sv_res["is_admin"] is False
+
+    # (d) Token từ Quản trị viên Lê Quốc Bảo (2224801030361@student.tdmu.edu.vn) -> is_admin = True
+    with patch("google.oauth2.id_token.verify_oauth2_token") as mock_verify:
+        mock_verify.return_value = {
+            "iss": "https://accounts.google.com",
+            "email": "2224801030361@student.tdmu.edu.vn",
+            "email_verified": True,
+            "name": "Lê Quốc Bảo",
+            "picture": "https://lh3.googleusercontent.com/a/baolq-tdmu",
+        }
+        admin_res = await verify_google_oauth(
+            GoogleAuthVerifyRequest(credential="valid_admin_jwt_token")
+        )
+        print(
+            f"  [+] Quản trị viên TDMU ({admin_res['email']}): "
+            f"authenticated={admin_res['authenticated']}, is_admin={admin_res['is_admin']}"
+        )
+        assert admin_res["authenticated"] is True
+        assert admin_res["is_admin"] is True
+
+    # 3.1. Kiểm thử truy cập /api/admin/analytics:
+    # - Chế độ Khách (x_user_email=None) -> 403
+    # - Email ngoài (@gmail.com) -> 403
+    # - Sinh viên TDMU khác (2224801030999@student.tdmu.edu.vn) -> 403
+    for unauthorized_email in [
+        None,
+        "sinhvienngoai@gmail.com",
+        "2224801030999@student.tdmu.edu.vn",
+    ]:
+        blocked = False
+        try:
+            await get_admin_analytics(x_user_email=unauthorized_email)
+        except HTTPException as exc:
+            print(
+                f"  [+] Chặn truy cập Admin đối với '{unauthorized_email}' -> HTTP {exc.status_code}"
+            )
+            assert exc.status_code == 403
+            blocked = True
+        assert blocked, f"Tài khoản '{unauthorized_email}' phải bị chặn 403 Forbidden!"
 
     # 3.2. Kiểm thử Chat + Feedback + Truy cập Admin Analytics với email hợp lệ @student.tdmu.edu.vn
     q1 = await chat_academic(

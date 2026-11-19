@@ -44,7 +44,9 @@ interface TDMUAuthUser {
   student_id: string;
   full_name: string;
   avatar_url?: string;
+  picture?: string;
   is_tdmu_student: boolean;
+  is_admin?: boolean;
 }
 
 interface ChatSessionItem {
@@ -338,15 +340,17 @@ function MarkdownContent({
 }
 
 export default function HomePage() {
-  // --- STATE XÁC THỰC GOOGLE OAUTH (@student.tdmu.edu.vn) & LỊCH SỬ HỘI THOẠI ---
+  // --- STATE XÁC THỰC GOOGLE OAUTH THỰC TẾ (@student.tdmu.edu.vn) & LỊCH SỬ HỘI THOẠI ---
   const [authUser, setAuthUser] = useState<TDMUAuthUser | null>(null);
   const [authStatusNotice, setAuthStatusNotice] = useState<string | null>(null);
   const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
-  const [oauthEmailInput, setOauthEmailInput] = useState<string>(
-    "2224801030361@student.tdmu.edu.vn"
-  );
-  const [oauthNameInput, setOauthNameInput] = useState<string>("Lê Quốc Bảo");
+  const [authModalError, setAuthModalError] = useState<string | null>(null);
   const [isAuthenticating, setIsAuthenticating] = useState<boolean>(false);
+  const [isGisButtonRendered, setIsGisButtonRendered] =
+    useState<boolean>(false);
+  const googleClientId = (
+    process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || ""
+  ).trim();
 
   // Quản lý Phiên chat & Sidebar lịch sử
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
@@ -412,8 +416,14 @@ export default function HomePage() {
           parsed.email &&
           parsed.email.toLowerCase().endsWith("@student.tdmu.edu.vn")
         ) {
-          setAuthUser(parsed);
-          fetchChatHistory(parsed.email);
+          const normalizedUser: TDMUAuthUser = {
+            ...parsed,
+            is_admin:
+              parsed.email.toLowerCase() ===
+              "2224801030361@student.tdmu.edu.vn",
+          };
+          setAuthUser(normalizedUser);
+          fetchChatHistory(normalizedUser.email);
         }
       }
     } catch {
@@ -421,33 +431,56 @@ export default function HomePage() {
     }
   }, [fetchChatHistory]);
 
-  // Nạp Google Identity Services (GIS) SDK nếu có cấu hình NEXT_PUBLIC_GOOGLE_CLIENT_ID
+  // Nạp Google Identity Services (GIS) SDK (`https://accounts.google.com/gsi/client`) với hosted_domain="student.tdmu.edu.vn"
   useEffect(() => {
-    const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
-    if (!clientId || !showAuthModal) return;
+    if (!showAuthModal) {
+      setIsGisButtonRendered(false);
+      return;
+    }
+
+    const hasValidClientId = Boolean(
+      googleClientId &&
+        googleClientId !==
+          "your_google_oauth_client_id.apps.googleusercontent.com"
+    );
+    if (!hasValidClientId) {
+      setIsGisButtonRendered(false);
+      return;
+    }
 
     const existingScript = document.getElementById("google-gis-script");
     const initGis = () => {
       if (window.google?.accounts?.id && googleButtonContainerRef.current) {
-        window.google.accounts.id.initialize({
-          client_id: clientId,
-          callback: async (response: any) => {
-            if (response?.credential) {
-              await verifyGoogleAccountWithBackend({
-                google_credential: response.credential,
-              });
+        try {
+          window.google.accounts.id.initialize({
+            client_id: googleClientId,
+            hd: "student.tdmu.edu.vn",
+            hosted_domain: "student.tdmu.edu.vn",
+            callback: async (response: any) => {
+              if (response?.credential) {
+                await verifyGoogleAccountWithBackend({
+                  credential: response.credential,
+                });
+              }
+            },
+          });
+          googleButtonContainerRef.current.innerHTML = "";
+          window.google.accounts.id.renderButton(
+            googleButtonContainerRef.current,
+            {
+              theme: "filled_blue",
+              size: "large",
+              text: "continue_with",
+              shape: "pill",
+              width: 340,
             }
-          },
-        });
-        window.google.accounts.id.renderButton(
-          googleButtonContainerRef.current,
-          {
-            theme: "outline",
-            size: "large",
-            text: "signin_with",
-            shape: "pill",
-          }
-        );
+          );
+          setIsGisButtonRendered(true);
+        } catch {
+          setIsGisButtonRendered(false);
+        }
+      } else {
+        setIsGisButtonRendered(false);
       }
     };
 
@@ -458,25 +491,26 @@ export default function HomePage() {
       script.async = true;
       script.defer = true;
       script.onload = initGis;
+      script.onerror = () => setIsGisButtonRendered(false);
       document.body.appendChild(script);
     } else {
       initGis();
     }
-  }, [showAuthModal]);
+  }, [showAuthModal, googleClientId]);
 
   // Cuộn tự động xuống tin nhắn mới nhất
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
 
-  // --- XỬ LÝ XÁC THỰC GOOGLE OAUTH & DOMAIN GUARD (`@student.tdmu.edu.vn`) ---
+  // --- XỬ LÝ XÁC THỰC GOOGLE OAUTH ID TOKEN THỰC TẾ & DOMAIN GUARD (`@student.tdmu.edu.vn`) ---
   const verifyGoogleAccountWithBackend = async (payload: {
-    email?: string;
-    full_name?: string;
-    google_credential?: string;
+    credential?: string;
+    access_token?: string;
   }) => {
     setIsAuthenticating(true);
     setAuthStatusNotice(null);
+    setAuthModalError(null);
 
     try {
       const res = await fetch("http://127.0.0.1:8000/api/auth/google", {
@@ -485,22 +519,14 @@ export default function HomePage() {
         body: JSON.stringify(payload),
       });
 
+      const data = await res.json().catch(() => ({}));
+
       if (!res.ok) {
-        throw new Error(`Lỗi xác thực máy chủ (HTTP ${res.status})`);
-      }
-
-      const data = await res.json();
-
-      if (!data.is_tdmu_student) {
-        setAuthUser(null);
-        localStorage.removeItem("tdmu_oauth_user");
-        setChatSessions([]);
-        setCurrentSessionId(null);
-        setAuthStatusNotice(
+        const msg =
+          data.detail ||
           data.message ||
-            "Chỉ tài khoản @student.tdmu.edu.vn mới được lưu lịch sử. Bạn đang ở Chế độ Khách (Không lưu lịch sử chat)."
-        );
-        setShowAuthModal(false);
+          `Xác thực Google OAuth bị từ chối (HTTP ${res.status})`;
+        setAuthModalError(msg);
         return;
       }
 
@@ -508,8 +534,10 @@ export default function HomePage() {
         email: data.email,
         student_id: data.student_id || extractMssvClientSide(data.email),
         full_name: data.full_name || `Sinh viên TDMU (${data.student_id})`,
-        avatar_url: data.avatar_url,
+        avatar_url: data.picture || data.avatar_url,
+        picture: data.picture || data.avatar_url,
         is_tdmu_student: true,
+        is_admin: Boolean(data.is_admin),
       };
 
       setAuthUser(verifiedUser);
@@ -519,21 +547,55 @@ export default function HomePage() {
       setIsSidebarOpen(true);
       await fetchChatHistory(verifiedUser.email);
     } catch (err: any) {
-      const rawEmail = (payload.email || "").trim().toLowerCase();
-      if (!rawEmail.endsWith("@student.tdmu.edu.vn")) {
-        setAuthUser(null);
-        localStorage.removeItem("tdmu_oauth_user");
-        setAuthStatusNotice(
-          `Domain Guard: Email '${rawEmail}' không thuộc @student.tdmu.edu.vn. Đã giữ nguyên Chế độ Khách (Không lưu lịch sử chat).`
-        );
-        setShowAuthModal(false);
-      } else {
-        setErrorBanner(
-          err?.message || "Không thể kết nối Backend để xác thực Google OAuth."
-        );
-      }
+      setAuthModalError(
+        err?.message || "Không thể kết nối Backend để xác thực Google OAuth."
+      );
     } finally {
       setIsAuthenticating(false);
+    }
+  };
+
+  // Mở hộp thoại chọn tài khoản Google OAuth2 Popup (khi bấm nút Continue with Google tùy chỉnh)
+  const handleTriggerGooglePopupLogin = () => {
+    setAuthModalError(null);
+    if (
+      !googleClientId ||
+      googleClientId === "your_google_oauth_client_id.apps.googleusercontent.com"
+    ) {
+      setAuthModalError(
+        "Chưa cấu hình biến môi trường NEXT_PUBLIC_GOOGLE_CLIENT_ID. Vui lòng khai báo Google OAuth Client ID trong file .env để bật cửa sổ chọn tài khoản Google."
+      );
+      return;
+    }
+
+    if (window.google?.accounts?.oauth2) {
+      const tokenClient = window.google.accounts.oauth2.initTokenClient({
+        client_id: googleClientId,
+        scope: "openid email profile",
+        hint: "@student.tdmu.edu.vn",
+        hosted_domain: "student.tdmu.edu.vn",
+        callback: async (tokenResponse: any) => {
+          if (tokenResponse?.access_token) {
+            await verifyGoogleAccountWithBackend({
+              access_token: tokenResponse.access_token,
+            });
+          } else if (tokenResponse?.error) {
+            setAuthModalError(
+              `Google OAuth Popup: ${tokenResponse.error_description || tokenResponse.error}`
+            );
+          }
+        },
+      });
+      tokenClient.requestAccessToken({ prompt: "select_account" });
+      return;
+    }
+
+    if (window.google?.accounts?.id) {
+      window.google.accounts.id.prompt();
+    } else {
+      setAuthModalError(
+        "Đang tải thư viện Google Identity Services (https://accounts.google.com/gsi/client). Vui lòng thử lại sau 1 giây."
+      );
     }
   };
 
@@ -1186,9 +1248,9 @@ export default function HomePage() {
             </div>
           </div>
 
-          {/* GÓC TRÊN BÊN PHẢI HEADER: CHỈ HIỂN THỊ NÚT QUẢN TRỊ (/admin) KHI ĐÃ ĐĂNG NHẬP @student.tdmu.edu.vn */}
+          {/* GÓC TRÊN BÊN PHẢI HEADER: CHỈ HIỂN THỊ NÚT QUẢN TRỊ (/admin) KHI user.is_admin === true (2224801030361@student.tdmu.edu.vn) */}
           <div className="flex flex-wrap items-center justify-end gap-2.5">
-            {authUser && authUser.is_tdmu_student && (
+            {authUser && authUser.is_admin === true && (
               <Link
                 href="/admin"
                 className="px-3 py-2 rounded-xl bg-[#003f7d] hover:bg-[#002f5e] text-amber-300 font-bold text-xs shadow-sm transition-all flex items-center gap-1.5 border border-amber-300/50"
@@ -1200,7 +1262,10 @@ export default function HomePage() {
             {!authUser ? (
               <button
                 type="button"
-                onClick={() => setShowAuthModal(true)}
+                onClick={() => {
+                  setAuthModalError(null);
+                  setShowAuthModal(true);
+                }}
                 className="px-3.5 py-2 rounded-xl bg-white hover:bg-blue-50 text-[#0054A6] font-bold text-xs shadow-md transition-all flex items-center gap-2 border border-amber-300"
               >
                 <svg className="w-4 h-4" viewBox="0 0 24 24">
@@ -1221,7 +1286,7 @@ export default function HomePage() {
                     d="M12 24c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3.1 0-5.8-2.1-6.7-5l-3.7 2.9C3.5 21.4 7.4 24 12 24z"
                   />
                 </svg>
-                <span>Đăng nhập Google (@student.tdmu.edu.vn)</span>
+                <span>Đăng nhập bằng Google (@student.tdmu.edu.vn)</span>
               </button>
             ) : (
               <div className="flex items-center gap-3 bg-[#003f7d] px-3.5 py-1.5 rounded-xl border border-amber-300/40 shadow-inner">
@@ -1237,6 +1302,11 @@ export default function HomePage() {
                     <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-200 border border-emerald-400/30 text-[10px] font-bold">
                       MSSV: {authUser.student_id}
                     </span>
+                    {authUser.is_admin && (
+                      <span className="px-1.5 py-0.5 rounded bg-amber-400 text-[#003f7d] text-[10px] font-extrabold">
+                        ADMIN
+                      </span>
+                    )}
                   </div>
                   <p className="text-[11px] text-blue-200 font-mono">
                     {authUser.email}
@@ -1255,7 +1325,7 @@ export default function HomePage() {
         </div>
       </header>
 
-      {/* MODAL ĐĂNG NHẬP GOOGLE OAUTH VỚI BỘ KIỂM TRA DOMAIN GUARD (@student.tdmu.edu.vn) */}
+      {/* MODAL ĐĂNG NHẬP GOOGLE OAUTH THỰC TẾ (GOOGLE IDENTITY SERVICES - KHÔNG CÓ Ô NHẬP TAY GIẢ LẬP) */}
       {showAuthModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-blue-100">
@@ -1266,10 +1336,10 @@ export default function HomePage() {
                 </div>
                 <div>
                   <h3 className="text-sm font-extrabold text-slate-900">
-                    Xác thực Google OAuth Sinh viên TDMU
+                    Đăng nhập Google OAuth Sinh viên TDMU
                   </h3>
                   <p className="text-[11px] text-slate-500">
-                    Domain Guard: Chỉ lưu lịch sử với{" "}
+                    Xác thực chữ ký số Google ID Token với{" "}
                     <code className="text-[#0054A6] font-bold">
                       @student.tdmu.edu.vn
                     </code>
@@ -1285,79 +1355,79 @@ export default function HomePage() {
               </button>
             </div>
 
-            <div className="mt-4 space-y-3.5 text-xs">
+            <div className="mt-4 space-y-4 text-xs">
               <div className="bg-blue-50/80 border border-blue-200 rounded-xl p-3 text-slate-700 leading-relaxed">
                 <p className="font-bold text-[#0054A6] mb-1">
-                  🔒 Quy tắc phân quyền Domain Guard TDMU:
+                  🔒 Xác thực Google Identity Services & Domain Guard:
                 </p>
                 <ul className="list-disc pl-4 space-y-1">
                   <li>
-                    Tài khoản có đuôi <strong>@student.tdmu.edu.vn</strong>: Tự
-                    động bóc tách <strong>MSSV</strong> từ tiền tố email và lưu
-                    vết lịch sử chat theo từng phiên vào SQLite.
+                    Hệ thống xác thực trực tiếp <strong>Google ID Token</strong>{" "}
+                    từ tài khoản Google của bạn (bắt buộc mật khẩu & bảo mật 2
+                    lớp của Google).
                   </li>
                   <li>
-                    Tài khoản Gmail ngoài trường: Tự động chuyển về{" "}
-                    <strong>Chế độ Khách (Guest)</strong> — vẫn tra cứu quy chế
-                    học vụ bình thường nhưng không lưu lịch sử.
+                    Chỉ chấp nhận tài khoản thuộc tên miền{" "}
+                    <strong>@student.tdmu.edu.vn</strong> để lưu lịch sử chat
+                    theo MSSV. Tài khoản <code>@gmail.com</code> cá nhân sẽ bị
+                    từ chối (403).
                   </li>
                 </ul>
               </div>
 
-              {/* Khung nút Google Identity Services chính thức (nếu có NEXT_PUBLIC_GOOGLE_CLIENT_ID) */}
+              {authModalError && (
+                <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl p-3 text-xs font-medium leading-relaxed">
+                  ⚠️ {authModalError}
+                </div>
+              )}
+
+              {/* Vùng render nút chính thức của Google Identity Services */}
               <div
                 ref={googleButtonContainerRef}
                 className="flex justify-center"
               />
 
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">
-                  Email Google Sinh viên TDMU:
-                </label>
-                <input
-                  type="email"
-                  value={oauthEmailInput}
-                  onChange={(e) => setOauthEmailInput(e.target.value)}
-                  placeholder="VD: 2224801030361@student.tdmu.edu.vn"
-                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-slate-900 font-mono text-xs focus:border-[#0054A6] focus:outline-none"
-                />
-              </div>
+              {/* Chỉ hiển thị nút dự phòng nếu NEXT_PUBLIC_GOOGLE_CLIENT_ID chưa được cấu hình hoặc SDK Google bị lỗi không tải được */}
+              {!isGisButtonRendered && (
+                <button
+                  type="button"
+                  disabled={isAuthenticating}
+                  onClick={handleTriggerGooglePopupLogin}
+                  className="w-full py-2.5 px-4 rounded-xl bg-white hover:bg-slate-50 text-slate-800 font-bold text-xs shadow-sm border border-slate-300 flex items-center justify-center gap-2.5 transition-all disabled:opacity-50"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 24 24">
+                    <path
+                      fill="#EA4335"
+                      d="M12 5c1.6 0 3 .6 4.1 1.7l3.1-3.1C17.3 1.8 14.8 1 12 1 7.4 1 3.5 3.6 1.6 7.4l3.7 2.8C6.2 7.2 8.9 5 12 5z"
+                    />
+                    <path
+                      fill="#4285F4"
+                      d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.5c-.3 1.5-1.1 2.8-2.4 3.6l3.7 2.9c2.2-2 3.7-5 3.7-8.7z"
+                    />
+                    <path
+                      fill="#FBBC05"
+                      d="M5.3 14.8c-.2-.8-.4-1.6-.4-2.5s.2-1.7.4-2.5L1.6 7C.6 9 0 11.2 0 13.5s.6 4.5 1.6 6.5l3.7-2.9z"
+                    />
+                    <path
+                      fill="#34A853"
+                      d="M12 24c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3.1 0-5.8-2.1-6.7-5l-3.7 2.9C3.5 21.4 7.4 24 12 24z"
+                    />
+                  </svg>
+                  <span>
+                    {isAuthenticating
+                      ? "Đang xác thực chữ ký Google Token..."
+                      : "Continue with Google (@student.tdmu.edu.vn)"}
+                  </span>
+                </button>
+              )}
 
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">
-                  Họ và tên hiển thị:
-                </label>
-                <input
-                  type="text"
-                  value={oauthNameInput}
-                  onChange={(e) => setOauthNameInput(e.target.value)}
-                  placeholder="VD: Lê Quốc Bảo"
-                  className="w-full rounded-xl border border-slate-300 px-3 py-2 text-slate-900 text-xs focus:border-[#0054A6] focus:outline-none"
-                />
-              </div>
-
-              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200">
+              <div className="flex items-center justify-end pt-2 border-t border-slate-200">
                 <button
                   type="button"
                   onClick={() => setShowAuthModal(false)}
-                  className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 font-semibold hover:bg-slate-50"
+                  className="px-4 py-1.5 rounded-xl border border-slate-300 text-slate-700 font-semibold hover:bg-slate-50"
                 >
-                  Hủy
-                </button>
-                <button
-                  type="button"
-                  disabled={isAuthenticating || !oauthEmailInput.trim()}
-                  onClick={() =>
-                    verifyGoogleAccountWithBackend({
-                      email: oauthEmailInput,
-                      full_name: oauthNameInput,
-                    })
-                  }
-                  className="px-5 py-2 rounded-xl bg-[#0054A6] hover:bg-[#003f7d] text-white font-bold shadow-sm disabled:opacity-50"
-                >
-                  {isAuthenticating
-                    ? "Đang kiểm tra Domain Guard..."
-                    : "Xác thực với Google OAuth"}
+                  Đóng
                 </button>
               </div>
             </div>

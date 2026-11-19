@@ -9,8 +9,12 @@ interface TDMUAuthUser {
   student_id: string;
   full_name: string;
   avatar_url?: string;
+  picture?: string;
   is_tdmu_student: boolean;
+  is_admin?: boolean;
 }
+
+const ALLOWED_ADMIN_EMAIL = "2224801030361@student.tdmu.edu.vn";
 
 interface ActiveDocumentItem {
   file: string;
@@ -95,7 +99,7 @@ export default function AdminDashboardPage() {
     }
   }, []);
 
-  // Kiểm tra trạng thái đăng nhập ngay khi tải trang; nếu là Guest -> chặn hiển thị và tự động điều hướng về `/`
+  // Kiểm tra trạng thái đăng nhập ngay khi tải trang; chỉ cho phép duy nhất 2224801030361@student.tdmu.edu.vn
   useEffect(() => {
     try {
       const saved = localStorage.getItem("tdmu_oauth_user");
@@ -105,7 +109,8 @@ export default function AdminDashboardPage() {
           parsed &&
           parsed.is_tdmu_student &&
           parsed.email &&
-          parsed.email.toLowerCase().endsWith("@student.tdmu.edu.vn")
+          parsed.email.toLowerCase() === ALLOWED_ADMIN_EMAIL &&
+          parsed.is_admin === true
         ) {
           setAuthUser(parsed);
           setAuthChecked(true);
@@ -122,7 +127,7 @@ export default function AdminDashboardPage() {
     setIsLoading(false);
     const redirectTimer = setTimeout(() => {
       router.replace("/");
-    }, 2500);
+    }, 2800);
     return () => clearTimeout(redirectTimer);
   }, [fetchAnalytics, router]);
 
@@ -193,13 +198,13 @@ export default function AdminDashboardPage() {
             🔒
           </div>
           <h2 className="text-base font-extrabold text-slate-900">
-            Truy cập bị từ chối — Yêu cầu Xác thực Tài khoản TDMU
+            Truy cập bị từ chối (403 Forbidden) — Chỉ dành cho Quản trị viên TDMU
           </h2>
           <p className="text-xs text-slate-600 leading-relaxed">
-            Bạn đang ở <strong>Chế độ Khách (Guest Mode)</strong>. Trang Quản
-            trị & Thống kê chỉ dành cho tài khoản đã đăng nhập bằng email{" "}
+            Cổng Quản trị & Thống kê chỉ cấp quyền truy cập duy nhất cho tài
+            khoản Quản trị viên hệ thống:{" "}
             <code className="font-mono font-bold text-[#0054A6]">
-              @student.tdmu.edu.vn
+              2224801030361@student.tdmu.edu.vn
             </code>
             .
           </p>
@@ -211,7 +216,7 @@ export default function AdminDashboardPage() {
               href="/"
               className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-[#0054A6] hover:bg-[#003f7d] text-white font-bold text-xs shadow-sm"
             >
-              <span>⬅ Quay về Trang chủ để Đăng nhập</span>
+              <span>⬅ Quay về Trang chủ để Đăng nhập Google OAuth</span>
             </Link>
           </div>
         </div>
