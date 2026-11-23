@@ -149,7 +149,7 @@ function splitCleanTextIntoTtsSegments(
   for (const sentence of rawSentences) {
     if (sentence.length > 450) {
       if (current) {
-        segments.append ? segments.push(current) : segments.push(current);
+        segments.push(current);
         current = "";
       }
       // Nếu 1 câu quá dài, tách nhỏ theo dấu phẩy
@@ -228,13 +228,12 @@ async function convertAudioBlobToWavBase64(blob: Blob): Promise<string> {
       const s = Math.max(-1, Math.min(1, channelData[i]));
       view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
     }
-    await audioCtx.close().catch(() => {});
+    await audioCtx.close().catch(() => { });
 
     const bytes = new Uint8Array(wavBuffer);
     let binary = "";
-    const chunkSize = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
     }
     return btoa(binary);
   } catch {
@@ -271,9 +270,8 @@ function MarkdownContent({
           ),
           strong: ({ children }) => (
             <strong
-              className={`font-bold ${
-                isUser ? "text-amber-200" : "text-[#0054A6]"
-              }`}
+              className={`font-bold ${isUser ? "text-amber-200" : "text-[#0054A6]"
+                }`}
             >
               {children}
             </strong>
@@ -322,11 +320,10 @@ function MarkdownContent({
           ),
           code: ({ children }) => (
             <code
-              className={`px-1.5 py-0.5 rounded font-mono text-xs ${
-                isUser
+              className={`px-1.5 py-0.5 rounded font-mono text-xs ${isUser
                   ? "bg-blue-800 text-amber-200"
                   : "bg-slate-100 text-[#0054A6] border border-slate-200"
-              }`}
+                }`}
             >
               {children}
             </code>
@@ -440,8 +437,8 @@ export default function HomePage() {
 
     const hasValidClientId = Boolean(
       googleClientId &&
-        googleClientId !==
-          "your_google_oauth_client_id.apps.googleusercontent.com"
+      googleClientId !==
+      "your_google_oauth_client_id.apps.googleusercontent.com"
     );
     if (!hasValidClientId) {
       setIsGisButtonRendered(false);
@@ -681,7 +678,7 @@ export default function HomePage() {
         setIsListeningVoice(true);
         setVoiceStatusHint(
           reasonHint ||
-            "🎙️ Đang ghi âm giọng nói (tối đa 15 giây)... Hãy nói câu hỏi và bấm lại nút 🎙️ để hoàn tất."
+          "🎙️ Đang ghi âm giọng nói (tối đa 15 giây)... Hãy nói câu hỏi và bấm lại nút 🎙️ để hoàn tất."
         );
       };
 
@@ -726,15 +723,15 @@ export default function HomePage() {
             setVoiceStatusHint(null);
             setErrorBanner(
               data.message ||
-                data.detail ||
-                "Không nhận diện được câu nói rõ ràng từ Micro. Vui lòng nói to hơn hoặc kiểm tra kết nối Micro."
+              data.detail ||
+              "Không nhận diện được câu nói rõ ràng từ Micro. Vui lòng nói to hơn hoặc kiểm tra kết nối Micro."
             );
           }
         } catch (err: any) {
           setVoiceStatusHint(null);
           setErrorBanner(
             err?.message ||
-              "Không thể kết nối tới endpoint /api/speech-to-text để nhận diện giọng nói."
+            "Không thể kết nối tới endpoint /api/speech-to-text để nhận diện giọng nói."
           );
         }
       };
@@ -767,7 +764,7 @@ export default function HomePage() {
       if (speechRecognitionRef.current) {
         try {
           speechRecognitionRef.current.stop();
-        } catch {}
+        } catch { }
       }
       setIsListeningVoice(false);
       setVoiceStatusHint(null);
@@ -869,20 +866,20 @@ export default function HomePage() {
     if (ttsAbortRef.current) {
       try {
         ttsAbortRef.current.abort();
-      } catch {}
+      } catch { }
       ttsAbortRef.current = null;
     }
     if (ttsAudioRef.current) {
       try {
         ttsAudioRef.current.pause();
         ttsAudioRef.current.currentTime = 0;
-      } catch {}
+      } catch { }
       ttsAudioRef.current = null;
     }
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       try {
         window.speechSynthesis.cancel();
-      } catch {}
+      } catch { }
     }
     setIsLoadingTts(false);
   };
@@ -1049,7 +1046,7 @@ export default function HomePage() {
           };
           window.speechSynthesis.speak(utterance);
           return;
-        } catch {}
+        } catch { }
       }
       setSpeakingMessageId(null);
       setErrorBanner(
@@ -1218,11 +1215,11 @@ export default function HomePage() {
 
   const userInitials = authUser?.full_name
     ? authUser.full_name
-        .split(" ")
-        .filter(Boolean)
-        .slice(-2)
-        .map((w) => w[0]?.toUpperCase())
-        .join("")
+      .split(" ")
+      .filter(Boolean)
+      .slice(-2)
+      .map((w) => w[0]?.toUpperCase())
+      .join("")
     : "SV";
 
   return (
@@ -1483,11 +1480,10 @@ export default function HomePage() {
                     <div
                       key={sess.id}
                       onClick={() => handleSelectSession(sess)}
-                      className={`group rounded-xl p-2.5 text-xs cursor-pointer transition-all border flex items-start justify-between gap-2 ${
-                        isSelected
+                      className={`group rounded-xl p-2.5 text-xs cursor-pointer transition-all border flex items-start justify-between gap-2 ${isSelected
                           ? "bg-[#0054A6]/10 border-[#0054A6]/40 text-[#0054A6] font-bold"
                           : "bg-white hover:bg-slate-50 border-slate-200/80 text-slate-700"
-                      }`}
+                        }`}
                     >
                       <div className="min-w-0 flex-1">
                         <p className="truncate leading-snug">{sess.title}</p>
@@ -1604,23 +1600,20 @@ export default function HomePage() {
                 return (
                   <div
                     key={msg.id}
-                    className={`flex ${
-                      isUser ? "justify-end" : "justify-start"
-                    }`}
+                    className={`flex ${isUser ? "justify-end" : "justify-start"
+                      }`}
                   >
                     <div
-                      className={`max-w-[92%] sm:max-w-[82%] rounded-2xl px-4 py-3.5 shadow-sm ${
-                        isUser
+                      className={`max-w-[92%] sm:max-w-[82%] rounded-2xl px-4 py-3.5 shadow-sm ${isUser
                           ? "bg-[#0054A6] text-white rounded-br-none"
                           : "bg-white text-slate-800 border border-slate-200/90 rounded-bl-none"
-                      }`}
+                        }`}
                     >
                       {/* Header nhỏ của từng bong bóng */}
                       <div className="flex items-center justify-between gap-4 mb-2">
                         <span
-                          className={`text-xs font-bold ${
-                            isUser ? "text-amber-200" : "text-[#0054A6]"
-                          }`}
+                          className={`text-xs font-bold ${isUser ? "text-amber-200" : "text-[#0054A6]"
+                            }`}
                         >
                           {isUser
                             ? authUser
@@ -1636,13 +1629,12 @@ export default function HomePage() {
                                 handleToggleSpeakAnswer(msg.id, msg.content)
                               }
                               title="Đọc to câu trả lời bằng giọng tiếng Việt (Text-to-Speech)"
-                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold transition-colors border ${
-                                speakingMessageId === msg.id
+                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold transition-colors border ${speakingMessageId === msg.id
                                   ? isLoadingTts
                                     ? "bg-amber-50 text-amber-800 border-amber-300 animate-pulse"
                                     : "bg-red-50 text-red-700 border-red-300 hover:bg-red-100"
                                   : "bg-blue-50 text-[#0054A6] border-blue-200 hover:bg-blue-100"
-                              }`}
+                                }`}
                             >
                               <span>
                                 {speakingMessageId === msg.id
@@ -1655,11 +1647,10 @@ export default function HomePage() {
                           )}
                           {!isUser && msg.is_safe !== undefined && (
                             <span
-                              className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold ${
-                                msg.is_safe
+                              className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold ${msg.is_safe
                                   ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
                                   : "bg-amber-50 text-amber-700 border border-amber-200"
-                              }`}
+                                }`}
                             >
                               {msg.is_safe
                                 ? "✓ Đã xác thực Guardrail"
@@ -1667,9 +1658,8 @@ export default function HomePage() {
                             </span>
                           )}
                           <span
-                            className={`text-[11px] ${
-                              isUser ? "text-blue-200" : "text-slate-400"
-                            }`}
+                            className={`text-[11px] ${isUser ? "text-blue-200" : "text-slate-400"
+                              }`}
                           >
                             {msg.timestamp}
                           </span>
@@ -1740,8 +1730,8 @@ export default function HomePage() {
                                 buildExportDocxUrl(pdfFileName);
                               const isTableQuote = Boolean(
                                 cit.quote &&
-                                  (cit.quote.includes("| --- |") ||
-                                    cit.quote.includes("|---|"))
+                                (cit.quote.includes("| --- |") ||
+                                  cit.quote.includes("|---|"))
                               );
 
                               return (
@@ -1757,9 +1747,8 @@ export default function HomePage() {
                                           href={pdfUrl}
                                           target="_blank"
                                           rel="noopener noreferrer"
-                                          title={`Mở file ${pdfFileName} tại Trang ${
-                                            cit.page_number ?? 1
-                                          }`}
+                                          title={`Mở file ${pdfFileName} tại Trang ${cit.page_number ?? 1
+                                            }`}
                                           className="inline-flex items-center gap-1.5 bg-[#0054A6] hover:bg-[#003f7d] text-white px-2.5 py-0.5 rounded-md shadow-xs transition-colors underline-offset-2 hover:underline"
                                         >
                                           <span>
@@ -1866,11 +1855,10 @@ export default function HomePage() {
                             <button
                               type="button"
                               onClick={() => handleFeedback(msg, "like")}
-                              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-all ${
-                                msg.feedback === "like"
+                              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-all ${msg.feedback === "like"
                                   ? "bg-emerald-600 text-white border-emerald-600 shadow-xs"
                                   : "bg-slate-50 hover:bg-emerald-50 text-slate-600 hover:text-emerald-700 border-slate-200"
-                              }`}
+                                }`}
                             >
                               <span>👍</span>
                               <span>Hữu ích</span>
@@ -1878,11 +1866,10 @@ export default function HomePage() {
                             <button
                               type="button"
                               onClick={() => handleFeedback(msg, "dislike")}
-                              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-all ${
-                                msg.feedback === "dislike"
+                              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-all ${msg.feedback === "dislike"
                                   ? "bg-red-600 text-white border-red-600 shadow-xs"
                                   : "bg-slate-50 hover:bg-red-50 text-slate-600 hover:text-red-700 border-slate-200"
-                              }`}
+                                }`}
                             >
                               <span>👎</span>
                               <span>Chưa chính xác</span>
@@ -1941,11 +1928,10 @@ export default function HomePage() {
                       ? "Đang lắng nghe giọng nói tiếng Việt... Nhấn để dừng"
                       : "Nói câu hỏi bằng tiếng Việt (Voice Input vi-VN)"
                   }
-                  className={`h-[58px] px-3.5 rounded-xl font-bold text-xs shadow-sm transition-all flex flex-col items-center justify-center gap-0.5 border shrink-0 ${
-                    isListeningVoice
+                  className={`h-[58px] px-3.5 rounded-xl font-bold text-xs shadow-sm transition-all flex flex-col items-center justify-center gap-0.5 border shrink-0 ${isListeningVoice
                       ? "bg-red-600 text-white border-red-600 animate-pulse"
                       : "bg-slate-50 hover:bg-blue-50 text-[#0054A6] border-slate-300 hover:border-[#0054A6]"
-                  }`}
+                    }`}
                 >
                   <span className="text-base leading-none">🎙️</span>
                   <span className="text-[10px]">
