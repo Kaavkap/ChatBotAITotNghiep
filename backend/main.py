@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
@@ -271,6 +271,8 @@ async def root_info():
             "chat_history": "GET /api/chat/history",
             "speech_to_text": "POST /api/speech-to-text",
             "text_to_speech": "POST /api/tts",
+            "messenger_webhook_verify": "GET /api/webhooks/messenger",
+            "messenger_webhook_events": "POST /api/webhooks/messenger",
             "message_feedback": "POST /api/messages/{message_id}/feedback",
             "admin_analytics": "GET /api/admin/analytics",
             "delete_chat_session": "DELETE /api/chat/session/{session_id}",
@@ -1169,5 +1171,186 @@ async def chat_academic(request: ChatRequest):
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def _format_rag_answer_for_messenger(
+    answer: str,
+    citations: List[Any],
+    max_chunk_len: int = 1900,
+) -> List[str]:
+    """
+    Chuyển đổi câu trả lời Markdown từ RAG Pipeline sang chữ thuần (Plain Text) gọn gàng cho Facebook Messenger
+    kèm danh sách trích dẫn Điều/Khoản/Trang, đồng thời tự động chia thành các tin nhắn <= 1.900 ký tự
+    theo giới hạn của Facebook Messenger Send API.
+    """
+    import re
+
+    text = (answer or "").strip()
+    # Loại bỏ dòng phân cách bảng Markdown | --- | --- |
+    lines_out: List[str] = []
+    for raw_line in text.splitlines():
+        s_line = raw_line.strip()
+        if re.match(r"^\|[\s\-:|]+\|$", s_line):
+            continue
+        if s_line.startswith("|") and s_line.endswith("|"):
+            cells = [c.strip() for c in s_line.strip("|").split("|") if c.strip()]
+            s_line = " • ".join(cells)
+        lines_out.append(s_line)
+
+    plain = "\n".join(lines_out)
+    # Chuyển link Markdown [label](url) -> label (url)
+    plain = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", plain)
+    # Loại bỏ ký hiệu in đậm/nghiêng/heading Markdown (**, *, `, #)
+    plain = re.sub(r"[*_`#]+", "", plain)
+    plain = re.sub(r"\n{3,}", "\n\n", plain).strip()
+
+    if citations:
+        cite_lines = ["\n📚 Nguồn trích dẫn Quy chế TDMU:"]
+        seen_cites = set()
+        for cit in citations:
+            doc_title = getattr(cit, "doc_title", None) or (
+                cit.get("doc_title") if isinstance(cit, dict) else ""
+            )
+            issue_year = getattr(cit, "issue_year", None) or (
+                cit.get("issue_year") if isinstance(cit, dict) else ""
+            )
+            article = getattr(cit, "article", None) or (
+                cit.get("article") if isinstance(cit, dict) else ""
+            )
+            page_num = getattr(cit, "page_number", None) or (
+                cit.get("page_number") if isinstance(cit, dict) else 1
+            )
+            label = f"- {doc_title} ({issue_year}) | {article} | Trang {page_num}"
+            if label not in seen_cites:
+                seen_cites.add(label)
+                cite_lines.append(label)
+        plain = f"{plain}\n" + "\n".join(cite_lines)
+
+    if len(plain) <= max_chunk_len:
+        return [plain]
+
+    chunks: List[str] = []
+    remaining = plain
+    while remaining:
+        if len(remaining) <= max_chunk_len:
+            chunks.append(remaining.strip())
+            break
+        split_pos = remaining.rfind("\n", 0, max_chunk_len)
+        if split_pos < int(max_chunk_len * 0.5):
+            split_pos = remaining.rfind(". ", 0, max_chunk_len)
+        if split_pos < int(max_chunk_len * 0.5):
+            split_pos = remaining.rfind(" ", 0, max_chunk_len)
+        if split_pos <= 0:
+            split_pos = max_chunk_len
+        chunks.append(remaining[:split_pos].strip())
+        remaining = remaining[split_pos:].strip()
+
+    return [c for c in chunks if c]
+
+
+@app.get("/api/webhooks/messenger")
+async def verify_messenger_webhook(
+    hub_mode: Optional[str] = Query(default=None, alias="hub.mode"),
+    hub_verify_token: Optional[str] = Query(default=None, alias="hub.verify_token"),
+    hub_challenge: Optional[str] = Query(default=None, alias="hub.challenge"),
+):
+    """
+    Endpoint xác thực Webhook với Meta / Facebook Messenger (`GET /api/webhooks/messenger`):
+    - Kiểm tra `hub.mode == "subscribe"` và `hub.verify_token == settings.messenger_verify_token`.
+    - Nếu hợp lệ: trả về `PlainTextResponse(hub.challenge)`.
+    - Nếu sai token hoặc thiếu mode: trả về lỗi `403 Forbidden`.
+    """
+    expected_token = settings.messenger_verify_token
+    if hub_mode == "subscribe" and hub_verify_token == expected_token:
+        return PlainTextResponse(content=str(hub_challenge or ""), status_code=200)
+
+    raise HTTPException(
+        status_code=403,
+        detail="Xác thực Facebook Messenger Webhook thất bại (403 Forbidden): hub.verify_token không hợp lệ.",
+    )
+
+
+@app.post("/api/webhooks/messenger")
+async def handle_messenger_webhook(payload: Dict[str, Any]):
+    """
+    Endpoint nhận sự kiện tin nhắn từ Facebook Messenger (`POST /api/webhooks/messenger`):
+    - Duyệt `entry[].messaging[]`, trích xuất `sender.id` và `message.text`.
+    - Bỏ qua tin nhắn echo (`message.is_echo == True`) để tránh lặp vô hạn.
+    - Gọi trực tiếp luồng RAG chống ảo giác (`rag_pipeline.query(...)`) để lấy câu trả lời kèm trích dẫn điều khoản TDMU.
+    - Chuyển Markdown sang chữ thuần gọn gàng, chia nhỏ nếu vượt quá 1.900 ký tự và gửi qua Facebook Graph API
+      (`https://graph.facebook.com/v21.0/me/messages`) khi có `MESSENGER_PAGE_ACCESS_TOKEN` (hoặc trả về JSON preview khi chạy test nội bộ).
+    """
+    import requests as std_requests
+
+    entries = payload.get("entry") or []
+    processed_events: List[Dict[str, Any]] = []
+    page_access_token = (settings.messenger_page_access_token or "").strip()
+
+    for entry in entries:
+        messaging_list = entry.get("messaging") or []
+        for event in messaging_list:
+            message_obj = event.get("message") or {}
+            # Bỏ qua tin nhắn echo từ chính fanpage để tránh lặp vô hạn
+            if message_obj.get("is_echo"):
+                continue
+
+            sender_id = str((event.get("sender") or {}).get("id") or "").strip()
+            user_text = str(message_obj.get("text") or "").strip()
+            if not sender_id or not user_text:
+                continue
+
+            rag_result = rag_pipeline.query(question=user_text, top_k=5, alpha=0.5)
+            citations_dump = [cit.model_dump() for cit in rag_result.citations]
+            chat_db.record_query_analytics(
+                question=f"[Messenger] {user_text}",
+                answer=rag_result.answer,
+                citations=citations_dump,
+                is_answerable=rag_result.is_answerable,
+            )
+
+            formatted_chunks = _format_rag_answer_for_messenger(
+                answer=rag_result.answer,
+                citations=rag_result.citations,
+                max_chunk_len=1900,
+            )
+
+            graph_delivery_status = "preview_only"
+            if page_access_token:
+                graph_url = "https://graph.facebook.com/v21.0/me/messages"
+                all_sent = True
+                for chunk_text in formatted_chunks:
+                    try:
+                        resp = std_requests.post(
+                            graph_url,
+                            params={"access_token": page_access_token},
+                            json={
+                                "recipient": {"id": sender_id},
+                                "messaging_type": "RESPONSE",
+                                "message": {"text": chunk_text},
+                            },
+                            timeout=10,
+                        )
+                        if resp.status_code >= 400:
+                            all_sent = False
+                    except Exception:
+                        all_sent = False
+                graph_delivery_status = "sent_to_graph_api" if all_sent else "graph_api_error"
+
+            processed_events.append(
+                {
+                    "sender_id": sender_id,
+                    "question": user_text,
+                    "messages": formatted_chunks,
+                    "citations_count": len(citations_dump),
+                    "is_safe": rag_result.is_safe,
+                    "delivery_mode": graph_delivery_status,
+                }
+            )
+
+    return {
+        "status": "EVENT_RECEIVED",
+        "processed_count": len(processed_events),
+        "replies": processed_events,
+    }
 
 

@@ -46,6 +46,14 @@ class Settings(BaseModel):
     ).strip()
     admin_emails: list[str] = ["2224801030361@student.tdmu.edu.vn"]
 
+    # Facebook Messenger Bot Webhook Configuration
+    messenger_verify_token: str = os.getenv(
+        "MESSENGER_VERIFY_TOKEN", "tdmu_rag_verify_token"
+    ).strip()
+    messenger_page_access_token: str = os.getenv(
+        "MESSENGER_PAGE_ACCESS_TOKEN", ""
+    ).strip()
+
 
 settings = Settings()
 

@@ -988,3 +988,12 @@ class AcademicRAGPipeline:
             expanded_queries if validated.is_answerable else []
         )
         return validated
+
+    def query(
+        self,
+        question: str,
+        top_k: int = 5,
+        alpha: float = 0.5,
+    ) -> GroundedRAGResponse:
+        """Alias cho `answer_question` phục vụ tích hợp Webhook (Facebook Messenger Bot, API đối tác...)."""
+        return self.answer_question(question=question, top_k=top_k, alpha=alpha)

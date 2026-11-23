@@ -18,10 +18,12 @@ from backend.main import (
     chat_academic,
     export_pdf_document_to_docx,
     get_admin_analytics,
+    handle_messenger_webhook,
     speech_to_text_endpoint,
     submit_message_feedback,
     text_to_speech_vietnamese,
     verify_google_oauth,
+    verify_messenger_webhook,
 )
 from backend.parsers.docx_extractor import (
     export_pdf_to_clean_docx,
@@ -243,7 +245,90 @@ async def run_verification() -> None:
     assert analytics["active_documents_count"] == 3
     assert analytics["total_chunks_indexed"] == 113
     assert analytics["feedback_summary"]["like_count"] >= 2
-    print("\n[OK] Kiểm thử Hybrid Voice STT, Guest Blocker 403 & Admin Analytics ĐẠT 100%!")
+
+    print("\n" + "=" * 88)
+    print("4. KIỂM THỬ FACEBOOK MESSENGER BOT WEBHOOK (GET & POST /api/webhooks/messenger)")
+    print("=" * 88)
+
+    # 4.1. Kiểm thử xác thực GET /api/webhooks/messenger với token đúng
+    challenge_resp = await verify_messenger_webhook(
+        hub_mode="subscribe",
+        hub_verify_token="tdmu_rag_verify_token",
+        hub_challenge="meta_challenge_2026",
+    )
+    challenge_body = (
+        challenge_resp.body.decode("utf-8")
+        if isinstance(challenge_resp.body, bytes)
+        else str(challenge_resp.body)
+    )
+    print(
+        f"  [+] Xác thực GET Webhook hợp lệ -> status={challenge_resp.status_code}, challenge='{challenge_body}'"
+    )
+    assert challenge_resp.status_code == 200
+    assert challenge_body == "meta_challenge_2026"
+
+    # 4.2. Kiểm thử GET /api/webhooks/messenger với token sai -> Phải trả về 403 Forbidden
+    wrong_token_blocked = False
+    try:
+        await verify_messenger_webhook(
+            hub_mode="subscribe",
+            hub_verify_token="wrong_verify_token",
+            hub_challenge="meta_challenge_2026",
+        )
+    except HTTPException as exc:
+        print(f"  [+] Chặn GET Webhook sai verify_token -> HTTP {exc.status_code}: {exc.detail}")
+        assert exc.status_code == 403
+        wrong_token_blocked = True
+    assert wrong_token_blocked
+
+    # 4.3. Kiểm thử POST /api/webhooks/messenger (gồm 1 tin nhắn echo cần bỏ qua + 1 câu hỏi quy chế thật)
+    sample_messenger_payload = {
+        "object": "page",
+        "entry": [
+            {
+                "id": "TDMU_PAGE_ID",
+                "time": 1732000000,
+                "messaging": [
+                    {
+                        "sender": {"id": "PAGE_SELF"},
+                        "recipient": {"id": "SV_TDMU_001"},
+                        "message": {
+                            "mid": "m_echo_1",
+                            "is_echo": True,
+                            "text": "Tin nhắn echo phải bị bỏ qua",
+                        },
+                    },
+                    {
+                        "sender": {"id": "SV_TDMU_2224801030361"},
+                        "recipient": {"id": "TDMU_PAGE_ID"},
+                        "message": {
+                            "mid": "m_question_1",
+                            "text": "Khi nào sinh viên TDMU bị cảnh báo học vụ hoặc buộc thôi học?",
+                        },
+                    },
+                ],
+            }
+        ],
+    }
+    webhook_post_res = await handle_messenger_webhook(sample_messenger_payload)
+    print(
+        f"  [+] POST Webhook xử lý: status={webhook_post_res['status']}, "
+        f"processed_count={webhook_post_res['processed_count']} (đã bỏ qua tin nhắn is_echo)"
+    )
+    assert webhook_post_res["status"] == "EVENT_RECEIVED"
+    assert webhook_post_res["processed_count"] == 1
+    first_reply = webhook_post_res["replies"][0]
+    print(
+        f"  [+] Phản hồi Messenger cho sender={first_reply['sender_id']}: "
+        f"citations={first_reply['citations_count']}, chunks={len(first_reply['messages'])}"
+    )
+    print(f"  [+] Nội dung tin nhắn Messenger preview:\n      {first_reply['messages'][0][:220]}...")
+    assert first_reply["sender_id"] == "SV_TDMU_2224801030361"
+    assert first_reply["citations_count"] > 0
+    assert all(len(m) <= 1900 for m in first_reply["messages"])
+    assert "Điều 23" in first_reply["messages"][0]
+
+    print("\n[OK] Kiểm thử Hybrid Voice STT, Guest Blocker 403, Admin Analytics & Messenger Webhook ĐẠT 100%!")
 
 
 if __name__ == "__main__":
