@@ -32,10 +32,16 @@ interface ChatMessage {
   backendMessageId?: string;
   role: "user" | "assistant";
   content: string;
+  originalQuestion?: string;
   citations?: Citation[];
   expanded_queries?: string[];
   is_safe?: boolean;
   feedback?: "like" | "dislike" | null;
+  aiReasoning?: string | null;
+  aiModel?: string | null;
+  aiEvaluatedQuestion?: string | null;
+  isReasoningLoading?: boolean;
+  aiReasoningError?: string | null;
   timestamp: string;
 }
 
@@ -321,8 +327,8 @@ function MarkdownContent({
           code: ({ children }) => (
             <code
               className={`px-1.5 py-0.5 rounded font-mono text-xs ${isUser
-                  ? "bg-blue-800 text-amber-200"
-                  : "bg-slate-100 text-[#0054A6] border border-slate-200"
+                ? "bg-blue-800 text-amber-200"
+                : "bg-slate-100 text-[#0054A6] border border-slate-200"
                 }`}
             >
               {children}
@@ -366,6 +372,9 @@ export default function HomePage() {
     null
   );
   const [isLoadingTts, setIsLoadingTts] = useState<boolean>(false);
+  const [customAiPrompts, setCustomAiPrompts] = useState<Record<string, string>>(
+    {}
+  );
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const googleButtonContainerRef = useRef<HTMLDivElement | null>(null);
   const speechRecognitionRef = useRef<any>(null);
@@ -621,16 +630,23 @@ export default function HomePage() {
       return;
     }
 
-    const loadedMessages: ChatMessage[] = session.messages.map((m) => ({
-      id: `db-${m.id}`,
-      backendMessageId: String(m.id),
-      role: m.role,
-      content: m.content,
-      citations: m.citations || [],
-      is_safe: m.is_safe,
-      feedback: m.feedback ?? null,
-      timestamp: m.created_at.slice(11, 16) || "Đã lưu",
-    }));
+    let lastUserQuestion = "";
+    const loadedMessages: ChatMessage[] = session.messages.map((m) => {
+      if (m.role === "user") {
+        lastUserQuestion = m.content;
+      }
+      return {
+        id: `db-${m.id}`,
+        backendMessageId: String(m.id),
+        role: m.role,
+        content: m.content,
+        originalQuestion: m.role === "assistant" ? lastUserQuestion : undefined,
+        citations: m.citations || [],
+        is_safe: m.is_safe,
+        feedback: m.feedback ?? null,
+        timestamp: m.created_at.slice(11, 16) || "Đã lưu",
+      };
+    });
     setMessages([WELCOME_MESSAGE, ...loadedMessages]);
   };
 
@@ -678,7 +694,7 @@ export default function HomePage() {
         setIsListeningVoice(true);
         setVoiceStatusHint(
           reasonHint ||
-          "🎙️ Đang ghi âm giọng nói (tối đa 15 giây)... Hãy nói câu hỏi và bấm lại nút 🎙️ để hoàn tất."
+          "Đang ghi âm giọng nói (tối đa 15 giây)... Hãy nói câu hỏi và bấm lại nút Giọng nói để hoàn tất."
         );
       };
 
@@ -697,7 +713,7 @@ export default function HomePage() {
         }
 
         setVoiceStatusHint(
-          "⏳ Đang chuyển đổi giọng nói sang văn bản tiếng Việt tại máy chủ..."
+          "Đang chuyển đổi giọng nói sang văn bản tiếng Việt tại máy chủ..."
         );
         try {
           const wavB64 = await convertAudioBlobToWavBase64(blob);
@@ -778,7 +794,7 @@ export default function HomePage() {
     // Nếu trình duyệt không có Web Speech API -> Chuyển thẳng sang MediaRecorder + Backend STT
     if (!SpeechRecognitionAPI) {
       startFallbackMediaRecorder(
-        "🎙️ Đang ghi âm giọng nói qua Micro (tối đa 15 giây)... Bấm lại nút 🎙️ khi nói xong."
+        "Đang ghi âm giọng nói qua Micro (tối đa 15 giây)... Bấm lại nút Giọng nói khi nói xong."
       );
       return;
     }
@@ -792,7 +808,7 @@ export default function HomePage() {
       recognition.onstart = () => {
         setIsListeningVoice(true);
         setVoiceStatusHint(
-          "🎙️ Đang lắng nghe giọng nói tiếng Việt (vi-VN)... Hãy nói câu hỏi của bạn."
+          "Đang lắng nghe giọng nói tiếng Việt (vi-VN)... Hãy nói câu hỏi của bạn."
         );
       };
 
@@ -830,7 +846,7 @@ export default function HomePage() {
           errCode === "aborted"
         ) {
           startFallbackMediaRecorder(
-            `⚠️ Web Speech API của trình duyệt báo lỗi (${errCode}) — Đã tự động chuyển sang chế độ Ghi âm dự phòng (tối đa 15 giây). Hãy nói câu hỏi và bấm lại 🎙️ để hoàn tất!`
+            `⚠ Web Speech API của trình duyệt báo lỗi (${errCode}) — Đã tự động chuyển sang chế độ Ghi âm dự phòng (tối đa 15 giây). Hãy nói câu hỏi và bấm lại nút Giọng nói để hoàn tất!`
           );
           return;
         }
@@ -838,7 +854,7 @@ export default function HomePage() {
         setIsListeningVoice(false);
         setVoiceStatusHint(null);
         setErrorBanner(
-          `Không nhận diện được giọng nói (${errCode}). Bạn có thể bấm lại nút 🎙️ để thử lại.`
+          `Không nhận diện được giọng nói (${errCode}). Bạn có thể bấm lại nút Giọng nói để thử lại.`
         );
       };
 
@@ -855,7 +871,7 @@ export default function HomePage() {
       recognition.start();
     } catch {
       startFallbackMediaRecorder(
-        "🎙️ Đang ghi âm giọng nói dự phòng (tối đa 15 giây)... Bấm lại nút 🎙️ khi nói xong."
+        "Đang ghi âm giọng nói dự phòng (tối đa 15 giây)... Bấm lại nút Giọng nói khi nói xong."
       );
     }
   };
@@ -1112,6 +1128,85 @@ export default function HomePage() {
     }
   };
 
+  // --- TÍNH NĂNG SUY LUẬN & HỎI ĐÁP SÂU THEO YÊU CẦU VỚI OLLAMA CỤC BỘ (`POST /api/chat/ai-reason`) ---
+  const handleTriggerAiReasoning = async (
+    msg: ChatMessage,
+    fallbackQuestion: string,
+    useCustomInput: boolean = false
+  ) => {
+    if (msg.isReasoningLoading) return;
+
+    const customText = useCustomInput
+      ? (customAiPrompts[msg.id] || "").trim()
+      : "";
+    const baseQuestion = (msg.originalQuestion || fallbackQuestion || "").trim();
+
+    setMessages((prev) =>
+      prev.map((item) =>
+        item.id === msg.id
+          ? {
+              ...item,
+              isReasoningLoading: true,
+              aiReasoningError: null,
+            }
+          : item
+      )
+    );
+
+    try {
+      const response = await fetch("http://127.0.0.1:8000/api/chat/ai-reason", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: baseQuestion || "Phân tích điều khoản quy chế TDMU",
+          custom_prompt: customText || null,
+          base_answer: msg.content,
+          citations: msg.citations || [],
+        }),
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(
+          data.detail ||
+            "Không thể kết nối Ollama cục bộ tại cổng 11434. Hãy kiểm tra ứng dụng Ollama đang chạy."
+        );
+      }
+
+      setMessages((prev) =>
+        prev.map((item) =>
+          item.id === msg.id
+            ? {
+                ...item,
+                isReasoningLoading: false,
+                aiReasoning:
+                  data.reasoning ||
+                  "Không nhận được phản hồi phân tích từ mô hình AI cục bộ.",
+                aiModel: data.model || "Ollama Local AI",
+                aiEvaluatedQuestion:
+                  data.evaluated_question || customText || baseQuestion,
+                aiReasoningError: null,
+              }
+            : item
+        )
+      );
+    } catch (err: any) {
+      setMessages((prev) =>
+        prev.map((item) =>
+          item.id === msg.id
+            ? {
+                ...item,
+                isReasoningLoading: false,
+                aiReasoningError:
+                  err?.message ||
+                  "Không thể kết nối Ollama cục bộ tại cổng 11434. Hãy kiểm tra ứng dụng Ollama đang chạy.",
+              }
+            : item
+        )
+      );
+    }
+  };
+
   // --- HÀM GỬI CÂU HỎI RAG CHAT ---
   const sendMessage = async (textToSend?: string) => {
     const trimmed = (textToSend ?? input).trim();
@@ -1165,6 +1260,7 @@ export default function HomePage() {
         role: "assistant",
         content:
           data.answer || "Không nhận được nội dung phản hồi từ hệ thống RAG.",
+        originalQuestion: trimmed,
         citations: Array.isArray(data.citations) ? data.citations : [],
         expanded_queries: Array.isArray(data.expanded_queries)
           ? data.expanded_queries
@@ -1252,7 +1348,19 @@ export default function HomePage() {
                 href="/admin"
                 className="px-3 py-2 rounded-xl bg-[#003f7d] hover:bg-[#002f5e] text-amber-300 font-bold text-xs shadow-sm transition-all flex items-center gap-1.5 border border-amber-300/50"
               >
-                <span>📊</span>
+                <svg
+                  className="w-4 h-4 shrink-0"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <line x1="18" y1="20" x2="18" y2="10" />
+                  <line x1="12" y1="20" x2="12" y2="4" />
+                  <line x1="6" y1="20" x2="6" y2="14" />
+                </svg>
                 <span>Quản trị & Thống kê</span>
               </Link>
             )}
@@ -1439,8 +1547,21 @@ export default function HomePage() {
           <aside className="w-72 bg-white border-r border-slate-200 flex flex-col shrink-0">
             <div className="p-3.5 border-b border-slate-200 flex items-center justify-between bg-slate-50">
               <div>
-                <p className="text-xs font-extrabold uppercase tracking-wider text-[#0054A6]">
-                  🗂️ Lịch sử Hội thoại
+                <p className="text-xs font-extrabold uppercase tracking-wider text-[#0054A6] flex items-center gap-1.5">
+                  <svg
+                    className="w-4 h-4 shrink-0"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                    <path d="M3 3v5h5" />
+                    <path d="M12 7v5l4 2" />
+                  </svg>
+                  <span>Lịch sử Hội thoại</span>
                 </p>
                 <p className="text-[11px] text-slate-500">
                   MSSV:{" "}
@@ -1481,8 +1602,8 @@ export default function HomePage() {
                       key={sess.id}
                       onClick={() => handleSelectSession(sess)}
                       className={`group rounded-xl p-2.5 text-xs cursor-pointer transition-all border flex items-start justify-between gap-2 ${isSelected
-                          ? "bg-[#0054A6]/10 border-[#0054A6]/40 text-[#0054A6] font-bold"
-                          : "bg-white hover:bg-slate-50 border-slate-200/80 text-slate-700"
+                        ? "bg-[#0054A6]/10 border-[#0054A6]/40 text-[#0054A6] font-bold"
+                        : "bg-white hover:bg-slate-50 border-slate-200/80 text-slate-700"
                         }`}
                     >
                       <div className="min-w-0 flex-1">
@@ -1498,7 +1619,18 @@ export default function HomePage() {
                         className="opacity-70 group-hover:opacity-100 text-slate-400 hover:text-red-600 px-1.5 py-0.5 rounded font-bold"
                         title="Xóa phiên chat này"
                       >
-                        🗑
+                        <svg
+                          className="w-3.5 h-3.5"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <polyline points="3 6 5 6 21 6" />
+                          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                        </svg>
                       </button>
                     </div>
                   );
@@ -1519,8 +1651,23 @@ export default function HomePage() {
                   onClick={() => setIsSidebarOpen((prev) => !prev)}
                   className="px-2.5 py-1 rounded-lg border border-slate-300 bg-slate-50 hover:bg-slate-100 text-xs font-semibold text-slate-700 flex items-center gap-1.5"
                 >
+                  <svg
+                    className="w-3.5 h-3.5 text-[#0054A6] shrink-0"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    {isSidebarOpen ? (
+                      <polyline points="15 18 9 12 15 6" />
+                    ) : (
+                      <polyline points="9 18 15 12 9 6" />
+                    )}
+                  </svg>
                   <span>
-                    {isSidebarOpen ? "◀ Ẩn lịch sử" : "▶ Hiện lịch sử"}
+                    {isSidebarOpen ? "Ẩn lịch sử" : "Hiện lịch sử"}
                   </span>
                   <span className="px-1.5 py-0.2 rounded-full bg-[#0054A6] text-white text-[10px]">
                     {chatSessions.length}
@@ -1595,8 +1742,13 @@ export default function HomePage() {
               )}
 
               {/* Danh sách bong bóng chat */}
-              {messages.map((msg) => {
+              {messages.map((msg, msgIdx) => {
                 const isUser = msg.role === "user";
+                const prevUserQuestion =
+                  msg.originalQuestion ||
+                  (msgIdx > 0 && messages[msgIdx - 1]?.role === "user"
+                    ? messages[msgIdx - 1].content
+                    : "");
                 return (
                   <div
                     key={msg.id}
@@ -1605,8 +1757,8 @@ export default function HomePage() {
                   >
                     <div
                       className={`max-w-[92%] sm:max-w-[82%] rounded-2xl px-4 py-3.5 shadow-sm ${isUser
-                          ? "bg-[#0054A6] text-white rounded-br-none"
-                          : "bg-white text-slate-800 border border-slate-200/90 rounded-bl-none"
+                        ? "bg-[#0054A6] text-white rounded-br-none"
+                        : "bg-white text-slate-800 border border-slate-200/90 rounded-bl-none"
                         }`}
                     >
                       {/* Header nhỏ của từng bong bóng */}
@@ -1630,26 +1782,63 @@ export default function HomePage() {
                               }
                               title="Đọc to câu trả lời bằng giọng tiếng Việt (Text-to-Speech)"
                               className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold transition-colors border ${speakingMessageId === msg.id
-                                  ? isLoadingTts
-                                    ? "bg-amber-50 text-amber-800 border-amber-300 animate-pulse"
-                                    : "bg-red-50 text-red-700 border-red-300 hover:bg-red-100"
-                                  : "bg-blue-50 text-[#0054A6] border-blue-200 hover:bg-blue-100"
+                                ? isLoadingTts
+                                  ? "bg-amber-50 text-amber-800 border-amber-300 animate-pulse"
+                                  : "bg-red-50 text-red-700 border-red-300 hover:bg-red-100"
+                                : "bg-blue-50 text-[#0054A6] border-blue-200 hover:bg-blue-100"
                                 }`}
                             >
-                              <span>
-                                {speakingMessageId === msg.id
-                                  ? isLoadingTts
-                                    ? "⏳ Đang tạo giọng đọc..."
-                                    : "⏹ Dừng đọc"
-                                  : "🔊 Đọc câu trả lời"}
-                              </span>
+                              {speakingMessageId === msg.id ? (
+                                isLoadingTts ? (
+                                  <>
+                                    <svg
+                                      className="w-3 h-3 animate-spin shrink-0"
+                                      viewBox="0 0 24 24"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      strokeWidth="2.2"
+                                    >
+                                      <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                                    </svg>
+                                    <span>Đang tạo giọng đọc...</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <svg
+                                      className="w-3 h-3 shrink-0"
+                                      viewBox="0 0 24 24"
+                                      fill="currentColor"
+                                    >
+                                      <rect x="6" y="6" width="12" height="12" rx="1.5" />
+                                    </svg>
+                                    <span>Dừng đọc</span>
+                                  </>
+                                )
+                              ) : (
+                                <>
+                                  <svg
+                                    className="w-3 h-3 shrink-0"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2.2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                  >
+                                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                                    <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+                                  </svg>
+                                  <span>Đọc câu trả lời</span>
+                                </>
+                              )}
                             </button>
                           )}
                           {!isUser && msg.is_safe !== undefined && (
                             <span
                               className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold ${msg.is_safe
-                                  ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
-                                  : "bg-amber-50 text-amber-700 border border-amber-200"
+                                ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                                : "bg-amber-50 text-amber-700 border border-amber-200"
                                 }`}
                             >
                               {msg.is_safe
@@ -1751,8 +1940,20 @@ export default function HomePage() {
                                             }`}
                                           className="inline-flex items-center gap-1.5 bg-[#0054A6] hover:bg-[#003f7d] text-white px-2.5 py-0.5 rounded-md shadow-xs transition-colors underline-offset-2 hover:underline"
                                         >
+                                          <svg
+                                            className="w-3.5 h-3.5 shrink-0"
+                                            viewBox="0 0 24 24"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            strokeWidth="2"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                          >
+                                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                            <polyline points="14 2 14 8 20 8" />
+                                          </svg>
                                           <span>
-                                            📄 {displayTitle}
+                                            {displayTitle}
                                             {issueYearLabel}
                                           </span>
                                           {cit.page_number && (
@@ -1768,15 +1969,42 @@ export default function HomePage() {
                                           title={`Chuyển đổi và tải về bản Microsoft Word (.docx) của văn bản ${displayTitle}`}
                                           className="inline-flex items-center gap-1 bg-blue-50 hover:bg-blue-100 text-[#0054A6] border border-blue-200 font-bold px-2 py-0.5 rounded-md shadow-xs transition-colors underline-offset-2 hover:underline text-[11px]"
                                         >
-                                          ⬇ Tải bản Word (.docx)
+                                          <svg
+                                            className="w-3 h-3 shrink-0"
+                                            viewBox="0 0 24 24"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            strokeWidth="2.2"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                          >
+                                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                            <polyline points="7 10 12 15 17 10" />
+                                            <line x1="12" y1="15" x2="12" y2="3" />
+                                          </svg>
+                                          <span>Tải bản Word (.docx)</span>
                                         </a>
                                       </>
                                     ) : (
                                       /* Văn bản DOCX: Hiển thị đồng thời 2 nút hành động (Xem trực tiếp Tab mới & Tải file DOCX gốc) */
                                       <>
                                         <span className="inline-flex items-center gap-1 bg-[#0054A6] text-white px-2.5 py-0.5 rounded-md shadow-xs">
-                                          📝 {displayTitle}
-                                          {issueYearLabel}
+                                          <svg
+                                            className="w-3.5 h-3.5 shrink-0"
+                                            viewBox="0 0 24 24"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            strokeWidth="2"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                          >
+                                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                            <polyline points="14 2 14 8 20 8" />
+                                          </svg>
+                                          <span>
+                                            {displayTitle}
+                                            {issueYearLabel}
+                                          </span>
                                         </span>
                                         <a
                                           href={docxPreviewUrl}
@@ -1785,7 +2013,19 @@ export default function HomePage() {
                                           title={`Xem trực tiếp nội dung ${pdfFileName} trên Tab mới`}
                                           className="inline-flex items-center gap-1 bg-amber-300 hover:bg-amber-400 text-[#003f7d] font-extrabold px-2 py-0.5 rounded-md shadow-xs transition-colors underline-offset-2 hover:underline text-[11px]"
                                         >
-                                          👁 Xem trực tiếp (Tab mới)
+                                          <svg
+                                            className="w-3.5 h-3.5 shrink-0"
+                                            viewBox="0 0 24 24"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            strokeWidth="2"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                          >
+                                            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                                            <circle cx="12" cy="12" r="3" />
+                                          </svg>
+                                          <span>Xem trực tiếp (Tab mới)</span>
                                         </a>
                                         <a
                                           href={pdfUrl}
@@ -1795,7 +2035,20 @@ export default function HomePage() {
                                           title={`Tải file văn bản Word gốc: ${pdfFileName}`}
                                           className="inline-flex items-center gap-1 bg-blue-100 hover:bg-blue-200 text-[#0054A6] border border-blue-300 font-bold px-2 py-0.5 rounded-md shadow-xs transition-colors underline-offset-2 hover:underline text-[11px]"
                                         >
-                                          ⬇ Tải file DOCX gốc
+                                          <svg
+                                            className="w-3 h-3 shrink-0"
+                                            viewBox="0 0 24 24"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            strokeWidth="2.2"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                          >
+                                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                            <polyline points="7 10 12 15 17 10" />
+                                            <line x1="12" y1="15" x2="12" y2="3" />
+                                          </svg>
+                                          <span>Tải file DOCX gốc</span>
                                         </a>
                                       </>
                                     )}
@@ -1845,7 +2098,190 @@ export default function HomePage() {
                         </div>
                       )}
 
-                      {/* KHỐI ĐÁNH GIÁ MỨC ĐỘ HÀI LÒNG CỦA SINH VIÊN (👍 HỮU ÍCH / 👎 CHƯA CHÍNH XÁC) */}
+                      {/* KHỐI SUY LUẬN & HỎI ĐÁP SÂU THEO YÊU CẦU VỚI AI CỤC BỘ (OLLAMA ON-DEMAND REASONING) */}
+                      {!isUser &&
+                        msg.id !== "welcome-msg" &&
+                        msg.citations &&
+                        msg.citations.length > 0 && (
+                          <div className="mt-4 pt-3 border-t border-indigo-100">
+                            <div className="bg-gradient-to-r from-indigo-50/80 via-blue-50/70 to-purple-50/70 border border-indigo-200/80 rounded-xl p-3 space-y-2.5">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <div className="flex items-center gap-1.5">
+                                  <svg
+                                    className="w-4 h-4 text-indigo-600 shrink-0"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                  >
+                                    <path d="M12 3l1.912 5.813a2 2 0 001.275 1.275L21 12l-5.813 1.912a2 2 0 00-1.275 1.275L12 21l-1.912-5.813a2 2 0 00-1.275-1.275L3 12l5.813-1.912a2 2 0 001.275-1.275L12 3z" />
+                                  </svg>
+                                  <span className="text-xs font-extrabold text-indigo-900">
+                                    Suy luận & Hỏi đáp sâu với AI (Ollama)
+                                  </span>
+                                  <span className="px-2 py-0.5 rounded-full bg-indigo-600 text-white text-[10px] font-bold">
+                                    Ollama Local AI
+                                  </span>
+                                </div>
+                                <button
+                                  type="button"
+                                  disabled={Boolean(msg.isReasoningLoading)}
+                                  onClick={() =>
+                                    handleTriggerAiReasoning(
+                                      msg,
+                                      prevUserQuestion,
+                                      false
+                                    )
+                                  }
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white font-bold text-xs shadow-xs transition-all disabled:opacity-50"
+                                >
+                                  <svg
+                                    className="w-3.5 h-3.5 shrink-0"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2.2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                  >
+                                    <path d="M12 3l1.912 5.813a2 2 0 001.275 1.275L21 12l-5.813 1.912a2 2 0 00-1.275 1.275L12 21l-1.912-5.813a2 2 0 00-1.275-1.275L3 12l5.813-1.912a2 2 0 001.275-1.275L12 3z" />
+                                  </svg>
+                                  <span>
+                                    {msg.isReasoningLoading
+                                      ? "Đang suy luận bằng AI cục bộ..."
+                                      : "Phân tích & Trả lời Có/Không bằng AI"}
+                                  </span>
+                                </button>
+                              </div>
+
+                              {/* Ô nhập tình huống cụ thể hoặc câu hỏi Có/Không đối chiếu trực tiếp với trích dẫn */}
+                              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                                <input
+                                  type="text"
+                                  value={customAiPrompts[msg.id] || ""}
+                                  onChange={(e) =>
+                                    setCustomAiPrompts((prev) => ({
+                                      ...prev,
+                                      [msg.id]: e.target.value,
+                                    }))
+                                  }
+                                  onKeyDown={(e) => {
+                                    if (
+                                      e.key === "Enter" &&
+                                      (customAiPrompts[msg.id] || "").trim()
+                                    ) {
+                                      e.preventDefault();
+                                      handleTriggerAiReasoning(
+                                        msg,
+                                        prevUserQuestion,
+                                        true
+                                      );
+                                    }
+                                  }}
+                                  disabled={Boolean(msg.isReasoningLoading)}
+                                  placeholder="Nhập tình huống cụ thể hoặc câu hỏi Có/Không (VD: GPA 1.9 năm 2 có bị cảnh báo không?)..."
+                                  className="flex-1 rounded-lg border border-indigo-200 bg-white px-3 py-1.5 text-xs text-slate-800 placeholder:text-slate-400 focus:border-indigo-600 focus:outline-none disabled:opacity-60"
+                                />
+                                <button
+                                  type="button"
+                                  disabled={
+                                    Boolean(msg.isReasoningLoading) ||
+                                    !(customAiPrompts[msg.id] || "").trim()
+                                  }
+                                  onClick={() =>
+                                    handleTriggerAiReasoning(
+                                      msg,
+                                      prevUserQuestion,
+                                      true
+                                    )
+                                  }
+                                  className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-indigo-50 text-indigo-700 border border-indigo-300 font-bold text-xs transition-colors disabled:opacity-50 shrink-0"
+                                >
+                                  <span>Hỏi AI tình huống này</span>
+                                  <svg
+                                    className="w-3.5 h-3.5 shrink-0"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="2.2"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                  >
+                                    <line x1="22" y1="2" x2="11" y2="13" />
+                                    <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                                  </svg>
+                                </button>
+                              </div>
+
+                              {/* Trạng thái đang suy luận trên chính tin nhắn này */}
+                              {msg.isReasoningLoading && (
+                                <div className="flex items-center gap-2.5 bg-white/90 border border-indigo-200 rounded-lg px-3 py-2 text-xs text-indigo-800 font-medium">
+                                  <div className="flex space-x-1">
+                                    <span className="w-2 h-2 bg-indigo-600 rounded-full animate-bounce [animation-delay:-0.3s]"></span>
+                                    <span className="w-2 h-2 bg-indigo-600 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
+                                    <span className="w-2 h-2 bg-indigo-600 rounded-full animate-bounce"></span>
+                                  </div>
+                                  <span>
+                                    Đang suy luận bằng AI cục bộ (đối chiếu
+                                    ngưỡng quy định trong trích dẫn)...
+                                  </span>
+                                </div>
+                              )}
+
+                              {/* Thông báo lỗi nếu Ollama đang tắt (HTTP 503) */}
+                              {msg.aiReasoningError && (
+                                <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg px-3 py-2 text-xs font-medium">
+                                  ⚠️ {msg.aiReasoningError}
+                                </div>
+                              )}
+
+                              {/* Thẻ hiển thị kết quả suy luận từ Ollama Local AI */}
+                              {msg.aiReasoning && !msg.isReasoningLoading && (
+                                <div className="bg-white border-2 border-indigo-300 rounded-xl p-3 shadow-xs space-y-2">
+                                  <div className="flex flex-wrap items-center justify-between gap-2 pb-1.5 border-b border-indigo-100">
+                                    <span className="text-xs font-extrabold text-indigo-900 flex items-center gap-1.5">
+                                      <svg
+                                        className="w-4 h-4 text-indigo-600 shrink-0"
+                                        viewBox="0 0 24 24"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        strokeWidth="2"
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                      >
+                                        <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 4.44-2.04Z" />
+                                        <path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-4.44-2.04Z" />
+                                      </svg>
+                                      <span>
+                                        Kết quả Phân tích Tình huống & Suy luận
+                                        Quy chế
+                                      </span>
+                                    </span>
+                                    <span className="px-2 py-0.5 rounded-md bg-indigo-100 text-indigo-800 font-mono font-bold text-[10px]">
+                                      Ollama Local AI ({msg.aiModel || "local"})
+                                    </span>
+                                  </div>
+                                  {msg.aiEvaluatedQuestion && (
+                                    <p className="text-[11px] text-indigo-700 bg-indigo-50/70 px-2.5 py-1 rounded-md font-medium">
+                                      <strong>Tình huống phân tích:</strong>{" "}
+                                      {msg.aiEvaluatedQuestion}
+                                    </p>
+                                  )}
+                                  <div className="text-slate-800">
+                                    <MarkdownContent
+                                      content={msg.aiReasoning}
+                                      compact={false}
+                                    />
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                      {/* KHỐI ĐÁNH GIÁ MỨC ĐỘ HÀI LÒNG CỦA SINH VIÊN (HỮU ÍCH / CHƯA CHÍNH XÁC) */}
                       {!isUser && msg.id !== "welcome-msg" && (
                         <div className="mt-3 pt-2.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs">
                           <span className="text-[11px] text-slate-400">
@@ -1855,23 +2291,45 @@ export default function HomePage() {
                             <button
                               type="button"
                               onClick={() => handleFeedback(msg, "like")}
-                              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-all ${msg.feedback === "like"
-                                  ? "bg-emerald-600 text-white border-emerald-600 shadow-xs"
-                                  : "bg-slate-50 hover:bg-emerald-50 text-slate-600 hover:text-emerald-700 border-slate-200"
+                              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-all ${msg.feedback === "like"
+                                ? "bg-emerald-600 text-white border-emerald-600 shadow-xs"
+                                : "bg-slate-50 hover:bg-emerald-50 text-slate-600 hover:text-emerald-700 border-slate-200"
                                 }`}
                             >
-                              <span>👍</span>
+                              <svg
+                                className="w-3.5 h-3.5 shrink-0"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              >
+                                <path d="M7 10v12" />
+                                <path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2h0a3.13 3.13 0 0 1 3 3.88Z" />
+                              </svg>
                               <span>Hữu ích</span>
                             </button>
                             <button
                               type="button"
                               onClick={() => handleFeedback(msg, "dislike")}
-                              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-all ${msg.feedback === "dislike"
-                                  ? "bg-red-600 text-white border-red-600 shadow-xs"
-                                  : "bg-slate-50 hover:bg-red-50 text-slate-600 hover:text-red-700 border-slate-200"
+                              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-all ${msg.feedback === "dislike"
+                                ? "bg-red-600 text-white border-red-600 shadow-xs"
+                                : "bg-slate-50 hover:bg-red-50 text-slate-600 hover:text-red-700 border-slate-200"
                                 }`}
                             >
-                              <span>👎</span>
+                              <svg
+                                className="w-3.5 h-3.5 shrink-0"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              >
+                                <path d="M17 14V2" />
+                                <path d="M9 18.12 10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76a2 2 0 0 0-1.79 1.11L12 22h0a3.13 3.13 0 0 1-3-3.88Z" />
+                              </svg>
                               <span>Chưa chính xác</span>
                             </button>
                           </div>
@@ -1928,12 +2386,24 @@ export default function HomePage() {
                       ? "Đang lắng nghe giọng nói tiếng Việt... Nhấn để dừng"
                       : "Nói câu hỏi bằng tiếng Việt (Voice Input vi-VN)"
                   }
-                  className={`h-[58px] px-3.5 rounded-xl font-bold text-xs shadow-sm transition-all flex flex-col items-center justify-center gap-0.5 border shrink-0 ${isListeningVoice
-                      ? "bg-red-600 text-white border-red-600 animate-pulse"
-                      : "bg-slate-50 hover:bg-blue-50 text-[#0054A6] border-slate-300 hover:border-[#0054A6]"
+                  className={`h-[58px] px-3.5 rounded-xl font-bold text-xs shadow-sm transition-all flex flex-col items-center justify-center gap-1 border shrink-0 ${isListeningVoice
+                    ? "bg-red-600 text-white border-red-600 animate-pulse"
+                    : "bg-slate-50 hover:bg-blue-50 text-[#0054A6] border-slate-300 hover:border-[#0054A6]"
                     }`}
                 >
-                  <span className="text-base leading-none">🎙️</span>
+                  <svg
+                    className="w-4 h-4 shrink-0"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                    <line x1="12" y1="19" x2="12" y2="22" />
+                  </svg>
                   <span className="text-[10px]">
                     {isListeningVoice ? "Đang nghe..." : "Giọng nói"}
                   </span>
@@ -1944,7 +2414,7 @@ export default function HomePage() {
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={handleKeyDown}
                   disabled={isLoading}
-                  placeholder="Nhập hoặc nhấn 🎙️ nói câu hỏi về Quy chế Học vụ Trường Đại học Thủ Dầu Một (Nhấn Enter để gửi)..."
+                  placeholder="Nhập hoặc nhấn nút Giọng nói để hỏi về Quy chế Học vụ Trường Đại học Thủ Dầu Một (Nhấn Enter để gửi)..."
                   className="flex-1 resize-none rounded-xl border border-slate-300 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-[#0054A6] focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#0054A6]/20 disabled:opacity-60"
                 />
                 <button
@@ -1954,7 +2424,18 @@ export default function HomePage() {
                   className="h-[58px] px-5 rounded-xl bg-[#0054A6] hover:bg-[#003f7d] active:bg-[#002f5e] text-white font-semibold text-sm shadow-sm transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
                 >
                   <span>{isLoading ? "Đang xử lý..." : "Gửi câu hỏi"}</span>
-                  <span aria-hidden="true">➤</span>
+                  <svg
+                    className="w-4 h-4 shrink-0"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <line x1="22" y1="2" x2="11" y2="13" />
+                    <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                  </svg>
                 </button>
               </div>
               <p className="text-[11px] text-slate-400 mt-1.5 text-center">

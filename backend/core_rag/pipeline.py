@@ -381,6 +381,235 @@ ACADEMIC_ARTICLE_REWRITE_KNOWLEDGE: Dict[int, str] = {
 }
 
 
+def strip_think_reasoning_tags(text: str) -> str:
+    """Loại bỏ toàn bộ cặp thẻ suy luận `<think>...</think>` từ phản hồi của các mô hình LLM (như Qwen3, DeepSeek-R1)."""
+    if not text:
+        return ""
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"</?think>", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
+def clean_latex_to_plain_math(text: str) -> str:
+    """
+    Chuyển đổi mọi ký hiệu LaTeX thô (`\\(...\\)`, `\\[...\\]`, `\\frac{a}{b}`, `\\approx`, `\\%`...)
+    sang biểu thức toán học chữ thuần dễ đọc (`a/b`, `≈`, `%`) để hiển thị sạch trên Markdown UI.
+    """
+    if not text:
+        return ""
+
+    out = text
+    # Gỡ các cặp dấu bao LaTeX \(...\), \[...\], $$...$$
+    out = re.sub(r"\\\(\s*(.*?)\s*\\\)", r"\1", out, flags=re.DOTALL)
+    out = re.sub(r"\\\[\s*(.*?)\s*\\\]", r"\1", out, flags=re.DOTALL)
+    out = re.sub(r"\$\$\s*(.*?)\s*\$\$", r"\1", out, flags=re.DOTALL)
+
+    # Chuyển \frac{a}{b} hoặc \dfrac{a}{b} -> a/b (lặp 2 lần cho trường hợp lồng nhau)
+    for _ in range(2):
+        out = re.sub(
+            r"\\d?frac\s*\{\s*([^{}]+?)\s*\}\s*\{\s*([^{}]+?)\s*\}",
+            r"\1/\2",
+            out,
+        )
+
+    # Chuyển \text{...}, \textbf{...}, \mathrm{...} -> nội dung bên trong
+    out = re.sub(
+        r"\\(?:text|textbf|textit|mathrm|mathbf)\s*\{\s*([^{}]*?)\s*\}",
+        r"\1",
+        out,
+    )
+
+    # Thay thế các toán tử LaTeX phổ biến sang ký tự Unicode chuẩn
+    latex_replacements = [
+        (r"\\approx", " ≈ "),
+        (r"\\times", " × "),
+        (r"\\cdot", " · "),
+        (r"\\div", " / "),
+        (r"\\geq?", " ≥ "),
+        (r"\\leq?", " ≤ "),
+        (r"\\neq?", " ≠ "),
+        (r"\\rightarrow|\\to\b", " → "),
+        (r"\\Rightarrow", " ⇒ "),
+        (r"\\%", "%"),
+    ]
+    for pattern, repl in latex_replacements:
+        out = re.sub(pattern, repl, out)
+
+    # Dọn khoảng trắng thừa trên cùng một dòng (giữ nguyên xuống dòng)
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    return out.strip()
+
+
+def format_ollama_analytical_output(raw_text: str) -> str:
+    """
+    Hậu xử lý phản hồi từ Ollama (`/api/chat/ai-reason`):
+    1. Loại bỏ `<think>...</think>` và chuyển đổi mọi LaTeX thô sang toán học chữ thuần (`a/b`, `≈`).
+    2. Bóc tách `<reasoning>...</reasoning>`, `VERDICT: Có | Không`, và `ADVICE: ...`
+       (hoặc dùng regex dự phòng nếu mô hình không đóng đúng thẻ XML).
+    3. Luôn lắp ráp kết quả Markdown cuối cùng với **Kết luận trực diện** ở ngay dòng đầu tiên,
+       tiếp theo là **Bước 1 (Đối chiếu & Tính toán)** và **Bước 2 (Khuyến nghị học vụ)**,
+       đảm bảo không bao giờ bị lặp hai mục "Kết luận".
+    """
+    cleaned = clean_latex_to_plain_math(strip_think_reasoning_tags(raw_text))
+    if not cleaned:
+        return ""
+
+    # 1. Trích xuất khối <reasoning>...</reasoning>
+    reasoning_match = re.search(
+        r"<reasoning>\s*(.*?)\s*</reasoning>",
+        cleaned,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    reasoning_body = reasoning_match.group(1).strip() if reasoning_match else ""
+
+    # Phần văn bản còn lại ngoài <reasoning>...</reasoning>
+    outside_reasoning = (
+        re.sub(
+            r"<reasoning>.*?</reasoning>",
+            "",
+            cleaned,
+            flags=re.DOTALL | re.IGNORECASE,
+        ).strip()
+        if reasoning_match
+        else cleaned
+    )
+    outside_reasoning = re.sub(
+        r"</?reasoning>", "", outside_reasoning, flags=re.IGNORECASE
+    ).strip()
+
+    # 2. Trích xuất VERDICT (ưu tiên dòng VERDICT: ..., sau đó đến Bước 2 / Kết luận)
+    verdict_match = re.search(
+        r"(?:VERDICT|KẾT\s*LUẬN(?:\s*TRỰC\s*DIỆN)?)\s*[:\-–]\s*\*{0,2}\s*([^\n\r]+)",
+        outside_reasoning,
+        flags=re.IGNORECASE,
+    )
+    if not verdict_match:
+        verdict_match = re.search(
+            r"(?:VERDICT|Bước\s*2\s*\(?Kết\s*luận\)?|Kết\s*luận(?:\s*trực\s*diện)?)\s*[:\-–]\s*\*{0,2}\s*([^\n\r]+)",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+
+    raw_verdict = verdict_match.group(1).strip() if verdict_match else ""
+
+    # 3. Trích xuất ADVICE (ưu tiên dòng ADVICE: ..., hoặc Bước 2/Bước 3 Khuyến nghị học vụ)
+    advice_match = re.search(
+        r"(?:ADVICE|Bước\s*[23]\s*\(?Khuyến\s*nghị(?:\s*học\s*vụ)?\)?|Khuyến\s*nghị(?:\s*học\s*vụ)?)\*{0,2}\s*[:\-–]\*{0,2}\s*(.+)",
+        outside_reasoning,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if not advice_match:
+        advice_match = re.search(
+            r"(?:ADVICE|Bước\s*[23]\s*\(?Khuyến\s*nghị(?:\s*học\s*vụ)?\)?|Khuyến\s*nghị(?:\s*học\s*vụ)?)\*{0,2}\s*[:\-–]\*{0,2}\s*(.+)",
+            cleaned,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+    advice_body = advice_match.group(1).strip() if advice_match else ""
+
+    # Nếu trong ADVICE vô tình dính dòng VERDICT ở phía dưới thì cắt bỏ
+    advice_body = re.sub(
+        r"\n\s*(?:VERDICT|KẾT\s*LUẬN).*$",
+        "",
+        advice_body,
+        flags=re.DOTALL | re.IGNORECASE,
+    ).strip()
+
+    # 4. Dự phòng nếu mô hình không dùng thẻ <reasoning>...</reasoning>
+    if not reasoning_body:
+        fallback_text = cleaned
+        # Loại bỏ các dòng VERDICT / Kết luận / ADVICE / Khuyến nghị khỏi phần tính toán
+        fallback_text = re.sub(
+            r"^\s*[-*•]?\s*\*{0,2}(?:VERDICT|Kết\s*luận(?:\s*trực\s*diện)?|Bước\s*2\s*\(?Kết\s*luận\)?)\*{0,2}\s*[:\-–]\*{0,2}.*$",
+            "",
+            fallback_text,
+            flags=re.MULTILINE | re.IGNORECASE,
+        )
+        fallback_text = re.sub(
+            r"\n?\s*[-*•]?\s*\*{0,2}(?:ADVICE|Bước\s*[23]\s*\(?Khuyến\s*nghị(?:\s*học\s*vụ)?\)?|Khuyến\s*nghị(?:\s*học\s*vụ)?)\*{0,2}\s*[:\-–]\*{0,2}.*$",
+            "",
+            fallback_text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        reasoning_body = fallback_text.strip()
+
+    # Làm sạch nhãn tiêu đề trùng lặp bên trong reasoning_body và advice_body
+    reasoning_body = re.sub(
+        r"^\s*[-*•]?\s*\*{0,2}Bước\s*1\s*\(?Đối\s*chiếu\s*(?:&|và)\s*Tính\s*toán\)?\*{0,2}\s*[:\-–]?\*{0,2}\s*",
+        "",
+        reasoning_body,
+        flags=re.IGNORECASE,
+    ).strip()
+    # Loại bỏ mọi dòng hoặc cụm "VERDICT:...", "Kết luận:...", "ADVICE:...", "Khuyến nghị học vụ:..."
+    # bị mô hình viết lồng vào cuối hoặc bên trong <reasoning> để Bước 1 không bao giờ lặp lại nội dung của Kết luận hay Bước 2
+    reasoning_body = re.sub(
+        r"(?:^|\n)\s*[-*•]?\s*\*{0,2}(?:VERDICT|Kết\s*luận(?:\s*trực\s*diện)?|Bước\s*2\s*\(?Kết\s*luận\)?)\*{0,2}\s*[:\-–]\*{0,2}[^\n\r]*",
+        "",
+        reasoning_body,
+        flags=re.IGNORECASE,
+    ).strip()
+    reasoning_body = re.sub(
+        r"(?:^|\n|\s+)\s*[-*•]?\s*\*{0,2}(?:ADVICE|Bước\s*[23]\s*\(?Khuyến\s*nghị(?:\s*học\s*vụ)?\)?|Khuyến\s*nghị(?:\s*học\s*vụ)?)\*{0,2}\s*[:\-–]\*{0,2}.*$",
+        "",
+        reasoning_body,
+        flags=re.DOTALL | re.IGNORECASE,
+    ).strip()
+    reasoning_body = re.sub(
+        r"\s*\b(?:VERDICT|ADVICE)\s*[:\-–].*$",
+        "",
+        reasoning_body,
+        flags=re.DOTALL | re.IGNORECASE,
+    ).strip()
+
+    advice_body = re.sub(
+        r"^\s*[-*•]?\s*\*{0,2}(?:ADVICE|Bước\s*[23]\s*\(?Khuyến\s*nghị(?:\s*học\s*vụ)?\)?|Khuyến\s*nghị(?:\s*học\s*vụ)?)\*{0,2}\s*[:\-–]?\*{0,2}\s*",
+        "",
+        advice_body,
+        flags=re.IGNORECASE,
+    ).strip()
+    advice_body = re.sub(r"</?reasoning>", "", advice_body, flags=re.IGNORECASE).strip()
+    reasoning_body = re.sub(r"</?reasoning>", "", reasoning_body, flags=re.IGNORECASE).strip()
+    raw_verdict = re.sub(r"</?reasoning>", "", raw_verdict, flags=re.IGNORECASE).strip()
+
+    # Chuẩn hóa giá trị Kết luận trực diện (Có / Không kèm giải thích ngắn nếu có)
+    raw_verdict_clean = re.sub(r"^\*{1,2}|\*{1,2}$", "", raw_verdict).strip()
+    if not raw_verdict_clean:
+        # Suy luận từ nội dung nếu mô hình quên dòng VERDICT
+        if re.search(
+            r"\b(?:không\s+được|không\s+đủ|bị\s+hạ|bị\s+giảm|bị\s+cảnh\s+báo|vượt\s+quá|vi\s+phạm)\b",
+            reasoning_body,
+            flags=re.IGNORECASE,
+        ):
+            raw_verdict_clean = "Không"
+        else:
+            raw_verdict_clean = "Có"
+
+    # Chuẩn hóa chữ đầu "Không" hoặc "Có" nổi bật
+    if re.match(r"^không\b", raw_verdict_clean, flags=re.IGNORECASE):
+        rest = re.sub(r"^không[\s,.\-–:]*", "", raw_verdict_clean, flags=re.IGNORECASE).strip()
+        verdict_display = f"**Không** — {rest}" if rest else "**Không**"
+    elif re.match(r"^có\b", raw_verdict_clean, flags=re.IGNORECASE):
+        rest = re.sub(r"^có[\s,.\-–:]*", "", raw_verdict_clean, flags=re.IGNORECASE).strip()
+        verdict_display = f"**Có** — {rest}" if rest else "**Có**"
+    else:
+        verdict_display = f"**{raw_verdict_clean}**"
+
+    if not advice_body:
+        advice_body = (
+            "Sinh viên có thể đối chiếu thêm bảng điểm cá nhân trên cổng thông tin đào tạo "
+            "hoặc liên hệ Phòng Đào tạo Đại học / Phòng Công tác Sinh viên TDMU để được hỗ trợ xác nhận."
+        )
+
+    if not reasoning_body:
+        reasoning_body = cleaned
+
+    assembled = (
+        f"- **Kết luận trực diện:** {verdict_display}\n"
+        f"- **Bước 1 (Đối chiếu & Tính toán):** {reasoning_body}\n"
+        f"- **Bước 2 (Khuyến nghị học vụ):** {advice_body}"
+    )
+    return clean_latex_to_plain_math(assembled)
+
+
 def clean_citation_quote_unicode(text: str, is_table: bool = False) -> str:
     """
     Hàm tự động làm sạch ký tự lạ, chuẩn hóa Unicode NFC và khôi phục tiếng Việt chuẩn
@@ -389,6 +618,7 @@ def clean_citation_quote_unicode(text: str, is_table: bool = False) -> str:
     if not text:
         return ""
 
+    text = strip_think_reasoning_tags(text)
     normalized = unicodedata.normalize("NFC", text)
     normalized = normalize_vietnamese_academic_text(normalized)
 
@@ -430,15 +660,27 @@ class AcademicRAGPipeline:
         reranker: AcademicReranker | None = None,
     ):
         self.vector_store = vector_store or AcademicVectorStore()
+        # Giữ nguyên Local Dense Embedder (1536d) cho embeddings, không gọi OpenAI/Ollama Embeddings API
+        self.vector_store.openai_client = None
         self.reranker = reranker or AcademicReranker()
         self.system_prompt = TDMU_SYSTEM_PROMPT
         has_valid_key = bool(
             OpenAI is not None
-            and settings.openai_api_key
-            and settings.openai_api_key != "your_openai_api_key_here"
+            and (
+                (
+                    settings.openai_api_key
+                    and settings.openai_api_key != "your_openai_api_key_here"
+                )
+                or settings.openai_base_url
+            )
         )
+        client_kwargs: Dict[str, Any] = {
+            "api_key": settings.openai_api_key or "ollama",
+        }
+        if settings.openai_base_url:
+            client_kwargs["base_url"] = settings.openai_base_url
         self.openai_client = (
-            OpenAI(api_key=settings.openai_api_key) if has_valid_key else None
+            OpenAI(**client_kwargs) if has_valid_key else None
         )
 
     @staticmethod
@@ -508,7 +750,18 @@ class AcademicRAGPipeline:
 
         q_lower = cleaned_query.lower()
 
-        if self.openai_client is not None:
+        # Ưu tiên bộ mở rộng thuật ngữ Học vụ TDMU chuẩn xác để tránh độ trễ/nhiễu từ LLM cục bộ
+        expanded: List[str] = []
+        for triggers, formal_queries in COLLOQUIAL_TO_ACADEMIC_EXPANSIONS:
+            if any(trig in q_lower for trig in triggers):
+                for fq in formal_queries:
+                    if fq not in expanded:
+                        expanded.append(fq)
+
+        if expanded:
+            return expanded[:3]
+
+        if self.openai_client is not None and not settings.openai_base_url:
             try:
                 mq_prompt = (
                     "Bạn là chuyên gia Quy chế Đào tạo Tín chỉ của Trường Đại học Thủ Dầu Một (TDMU - Quyết định 1774/QĐ-ĐHTDM). "
@@ -529,20 +782,17 @@ class AcademicRAGPipeline:
                 )
                 parsed = completion.choices[0].message.parsed
                 if parsed and parsed.queries:
-                    llm_queries = [q.strip() for q in parsed.queries if q.strip()]
+                    llm_queries = [
+                        strip_think_reasoning_tags(q).strip()
+                        for q in parsed.queries
+                        if strip_think_reasoning_tags(q).strip()
+                    ]
                     if llm_queries:
                         return llm_queries[:3]
             except Exception as exc:
                 print(
                     f"[!] Cảnh báo Multi-Query OpenAI ({exc}) -> Sử dụng bộ mở rộng thuật ngữ Học vụ TDMU."
                 )
-
-        expanded: List[str] = []
-        for triggers, formal_queries in COLLOQUIAL_TO_ACADEMIC_EXPANSIONS:
-            if any(trig in q_lower for trig in triggers):
-                for fq in formal_queries:
-                    if fq not in expanded:
-                        expanded.append(fq)
 
         if not expanded:
             expanded = [
@@ -926,68 +1176,129 @@ class AcademicRAGPipeline:
                 expanded_queries=[],
             )
 
-        # Bước 4: Sinh câu trả lời (qua OpenAI LLM hoặc bộ Tổng hợp Học thuật TDMU) & kiểm duyệt Guardrail
-        if self.openai_client is not None:
-            try:
-                context_str = self.format_context(reranked_top_chunks)
-                user_prompt = (
-                    f"[NGỮ CẢNH QUY CHẾ TDMU (ĐÃ QUA MULTI-QUERY & RE-RANKING TOP {len(reranked_top_chunks)})]:\n{context_str}\n\n"
-                    f"[CÂU HỎI GỐC CỦA SINH VIÊN]:\n{question}\n"
-                    f"[CÁC TRUY VẤN MỞ RỘNG HỌC VỤ]:\n{'; '.join(expanded_queries)}\n\n"
-                    "CHỈ THỊ BẮT BUỘC:\n"
-                    "1. Nếu các đoạn ngữ cảnh cung cấp KHÔNG chứa câu trả lời trực tiếp cho câu hỏi của sinh viên "
-                    "(ví dụ: sinh viên hỏi giá tiền học phí nhưng văn bản chỉ nói quy định đăng ký tín chỉ), "
-                    "TUYỆT ĐỐI KHÔNG tự ý tóm tắt các điều khoản không liên quan để lấp chỗ trống. "
-                    "Hãy đặt `is_answerable = false`, `citations = []` và từ chối trả lời ngắn gọn, lịch sự.\n"
-                    "2. Nếu có thông tin trả lời, hãy đọc hiểu ngữ cảnh và VIẾT LẠI HOÀN TOÀN bằng tiếng Việt "
-                    "chuẩn ngữ pháp, đủ dấu, văn phong học thuật chuẩn mực của Trường Đại học Thủ Dầu Một."
-                )
-                completion = self.openai_client.beta.chat.completions.parse(
-                    model=settings.llm_model,
-                    temperature=0.0,
-                    messages=[
-                        {"role": "system", "content": self.system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    response_format=GroundedRAGResponse,
-                )
-                parsed_response = completion.choices[0].message.parsed
-                if parsed_response is not None:
-                    parsed_response.answer = clean_citation_quote_unicode(
-                        parsed_response.answer,
-                        is_table=("| --- |" in parsed_response.answer),
-                    )
-                    for cit in parsed_response.citations:
-                        cit.article = clean_citation_quote_unicode(cit.article)
-                        cit.clause = clean_citation_quote_unicode(cit.clause)
-                        cit.chapter = clean_citation_quote_unicode(cit.chapter)
-                        cit.quote = clean_citation_quote_unicode(
-                            cit.quote, is_table=cit.is_table
-                        )
-                    validated = validate_grounded_response(
-                        parsed_response, reranked_top_chunks
-                    )
-                    validated.expanded_queries = (
-                        expanded_queries if validated.is_answerable else []
-                    )
-                    return validated
-            except Exception as exc:
-                print(
-                    f"[!] Cảnh báo gọi OpenAI LLM ({exc}) -> Chuyển sang bộ Tổng hợp & Diễn giải Học thuật TDMU."
-                )
-
+        # Bước 4: Luồng tra cứu mặc định (`/api/chat`) LUÔN sử dụng bộ Tổng hợp Học thuật tất định (Deterministic Academic Synthesis Engine)
+        # để đảm bảo phản hồi tức thì, chính xác 100% trích dẫn mà không bị độ trễ LLM hay từ chối nhầm.
         synthesized_response = self._synthesize_academic_response(
             question=question,
             retrieved=reranked_top_chunks,
             expanded_queries=expanded_queries,
         )
+        synthesized_response.answer = strip_think_reasoning_tags(
+            synthesized_response.answer
+        )
         validated = validate_grounded_response(
             synthesized_response, reranked_top_chunks
         )
+        validated.answer = strip_think_reasoning_tags(validated.answer)
         validated.expanded_queries = (
             expanded_queries if validated.is_answerable else []
         )
         return validated
+
+    def reason_with_ollama(
+        self,
+        question: str,
+        base_answer: str,
+        citations: List[Dict[str, Any]],
+        custom_prompt: str | None = None,
+    ) -> Dict[str, Any]:
+        """
+        Tầng Suy luận & Hỏi đáp sâu theo yêu cầu (On-Demand Ollama Reasoning — `POST /api/chat/ai-reason`):
+        - Kết nối tới Ollama cục bộ tại `settings.openai_base_url` (`http://localhost:11434/v1`)
+          với mô hình `settings.llm_model` (ví dụ: `qwen2.5:3b` hoặc `qwen3:8b`).
+        - Phân tích logic từng bước để trả lời câu hỏi Có/Không hoặc tình huống cá nhân của sinh viên
+          (so sánh GPA, số tín chỉ tích lũy, thời gian học... với ngưỡng quy định trong trích dẫn).
+        - Tự động loại bỏ thẻ `<think>...</think>`. Nếu Ollama đang tắt hoặc quá thời gian chờ,
+          ném lỗi `ConnectionError` để tầng API trả về HTTP 503 rõ ràng bằng tiếng Việt.
+        """
+        if OpenAI is None:
+            raise ConnectionError(
+                "Không thể kết nối Ollama cục bộ tại cổng 11434. Hãy kiểm tra ứng dụng Ollama đang chạy."
+            )
+
+        base_url = (settings.openai_base_url or "http://localhost:11434/v1").strip()
+        api_key = (settings.openai_api_key or "ollama").strip()
+        model_name = (settings.llm_model or "qwen2.5:3b").strip()
+
+        citation_blocks: List[str] = []
+        for idx, cit in enumerate(citations or [], start=1):
+            doc_title = cit.get("doc_title") or cit.get("document_name") or "Quy chế TDMU"
+            issue_year = cit.get("issue_year") or ""
+            article = cit.get("article") or ""
+            clause = cit.get("clause") or ""
+            page_num = cit.get("page_number") or 1
+            quote = cit.get("quote") or ""
+            citation_blocks.append(
+                f"[Trích dẫn #{idx}] Văn bản: {doc_title} (Năm {issue_year}) | "
+                f"{article} {clause} | Trang {page_num}:\n{quote}"
+            )
+
+        citations_context = (
+            "\n\n".join(citation_blocks)
+            if citation_blocks
+            else "Sử dụng nội dung tổng hợp quy chế bên dưới để đối chiếu."
+        )
+
+        target_scenario = (custom_prompt or "").strip()
+        effective_question = (
+            f"Câu hỏi gốc: {question}\nTình huống / Câu hỏi suy luận cụ thể của sinh viên: {target_scenario}"
+            if target_scenario
+            else f"Câu hỏi cần phân tích & kết luận Có/Không hoặc giải thích chi tiết: {question}"
+        )
+
+        analytical_system_prompt = (
+            "Bạn là Chuyên gia Phân tích Quy chế & Cố vấn Học vụ của Trường Đại học Thủ Dầu Một (TDMU).\n"
+            "NHIỆM VỤ BẮT BUỘC:\n"
+            "1. Đọc kỹ [NỘI DUNG QUY CHẾ ĐÃ TRÍCH XUẤT] và [CÁC TRÍCH DẪN ĐIỀU KHOẢN GỐC] được cung cấp.\n"
+            "2. Thực hiện đối chiếu số liệu và tính toán từng bước TRƯỚC KHI đưa ra kết luận Có/Không, theo đúng định dạng đầu ra bắt buộc sau đây:\n"
+            "   - Đầu tiên, viết toàn bộ phần đối chiếu điều khoản và phép tính số học vào bên trong cặp thẻ `<reasoning>...</reasoning>`.\n"
+            "     + QUY TẮC TOÁN HỌC BẮT BUỘC: Chỉ sử dụng chữ thuần dễ đọc như `7 / 120 = 5,83% > 5%` hoặc `120 × 5% = 6 tín chỉ`. TUYỆT ĐỐI KHÔNG dùng ký hiệu LaTeX như `\\frac`, `\\(`, `\\)`, `\\[`, `\\]` hay `\\approx`.\n"
+            "     + Trong thẻ `<reasoning>`, chỉ đối chiếu và tính toán, chưa viết dòng VERDICT.\n"
+            "   - Ngay sau thẻ `</reasoning>`, xuống dòng và xuất đúng dòng:\n"
+            "     `VERDICT: Không` (nếu sinh viên vi phạm bất kỳ điều kiện nào, vượt ngưỡng giới hạn 5%, bị hạ bậc, bị cảnh báo hoặc không đủ điều kiện) HOẶC `VERDICT: Có` (chỉ khi thỏa mãn đầy đủ tất cả điều kiện).\n"
+            "   - Ngay dòng tiếp theo, xuất đúng dòng:\n"
+            "     `ADVICE: <ghi chú khuyến nghị học vụ ngắn gọn, hướng dẫn bước tiếp theo hoặc liên hệ Phòng Đào tạo Đại học / Phòng Công tác Sinh viên TDMU>`.\n"
+            "3. TUYỆT ĐỐI KHÔNG xuất thông báo từ chối 'ngoài phạm vi dữ liệu' khi đã có trích dẫn quy chế đi kèm. "
+            "Trình bày hoàn toàn bằng tiếng Việt chuẩn mực, rõ ràng, súc tích."
+        )
+
+        analytical_user_prompt = (
+            f"[NỘI DUNG QUY CHẾ ĐÃ TRÍCH XUẤT]:\n{base_answer}\n\n"
+            f"[CÁC TRÍCH DẪN ĐIỀU KHOẢN GỐC TDMU]:\n{citations_context}\n\n"
+            f"[YÊU CẦU PHÂN TÍCH TÌNH HUỐNG]:\n{effective_question}"
+        )
+
+        try:
+            client = OpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                timeout=45.0,
+                max_retries=0,
+            )
+            completion = client.chat.completions.create(
+                model=model_name,
+                temperature=0.1,
+                messages=[
+                    {"role": "system", "content": analytical_system_prompt},
+                    {"role": "user", "content": analytical_user_prompt},
+                ],
+            )
+            raw_content = (completion.choices[0].message.content or "").strip()
+            cleaned_reasoning = format_ollama_analytical_output(raw_content)
+            if not cleaned_reasoning:
+                cleaned_reasoning = (
+                    "Không nhận được nội dung phân tích từ mô hình AI cục bộ. Vui lòng thử lại."
+                )
+            return {
+                "reasoning": cleaned_reasoning,
+                "model": model_name,
+                "base_url": base_url,
+                "evaluated_question": target_scenario or question,
+            }
+        except Exception as exc:
+            raise ConnectionError(
+                "Không thể kết nối Ollama cục bộ tại cổng 11434. Hãy kiểm tra ứng dụng Ollama đang chạy."
+            ) from exc
 
     def query(
         self,

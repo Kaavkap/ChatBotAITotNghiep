@@ -471,7 +471,7 @@ export default function AdminDashboardPage() {
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div>
                 <h2 className="text-sm font-extrabold text-[#0054A6] uppercase tracking-wider">
-                  🗂️ Danh mục Văn bản Quy chế & Hướng dẫn Đang nạp trong Qdrant
+                  📚 Danh mục Văn bản Quy chế & Hướng dẫn Đang nạp trong Qdrant
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
                   Hỗ trợ mở trực tiếp file PDF gốc hoặc tải bản Microsoft Word

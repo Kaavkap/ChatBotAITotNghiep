@@ -179,6 +179,32 @@ class ChatAPIResponse(BaseModel):
     auth_mode: str = "guest"
 
 
+class AIReasonRequest(BaseModel):
+    """Payload cho endpoint suy luận sâu theo yêu cầu bằng Ollama cục bộ (`POST /api/chat/ai-reason`)."""
+
+    question: str = Field(..., description="Câu hỏi gốc của sinh viên")
+    custom_prompt: Optional[str] = Field(
+        default=None,
+        description="Tình huống cụ thể hoặc câu hỏi Có/Không người dùng nhập thêm để đối chiếu với trích dẫn",
+    )
+    base_answer: str = Field(
+        default="",
+        description="Câu trả lời quy chế chuẩn đã tổng hợp từ bước tra cứu tất định",
+    )
+    citations: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Danh sách các đoạn trích dẫn Điều/Khoản/Mục làm căn cứ suy luận",
+    )
+
+
+class AIReasonResponse(BaseModel):
+    """Phản hồi suy luận logic từ mô hình Ollama cục bộ."""
+
+    reasoning: str
+    model: str
+    evaluated_question: str
+
+
 class MessageFeedbackRequest(BaseModel):
     """Payload đánh giá mức độ hài lòng cho câu trả lời AI (`like` | `dislike` | `null`)."""
 
@@ -268,6 +294,7 @@ async def root_info():
         "indexed_chunks": INITIAL_CHUNKS_COUNT,
         "endpoints": {
             "chat": "POST /api/chat",
+            "chat_ai_reason": "POST /api/chat/ai-reason",
             "chat_history": "GET /api/chat/history",
             "speech_to_text": "POST /api/speech-to-text",
             "text_to_speech": "POST /api/tts",
@@ -1171,6 +1198,43 @@ async def chat_academic(request: ChatRequest):
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/chat/ai-reason", response_model=AIReasonResponse)
+async def ai_reason_with_ollama(request: AIReasonRequest):
+    """
+    Endpoint Suy luận & Hỏi đáp sâu theo yêu cầu bằng Ollama cục bộ (`POST /api/chat/ai-reason`):
+    - Nhận `{ "question": str, "custom_prompt": Optional[str], "base_answer": str, "citations": list }`.
+    - Gọi mô hình Ollama cục bộ tại `settings.openai_base_url` (`http://localhost:11434/v1`) với `settings.llm_model`.
+    - Thực hiện suy luận từng bước để trả lời câu hỏi Có/Không hoặc tình huống cá nhân dựa chặt chẽ trên các trích dẫn đã tìm được.
+    - Loại bỏ thẻ `<think>...</think>`. Nếu Ollama đang tắt hoặc quá thời gian chờ, trả về HTTP 503 kèm thông báo tiếng Việt rõ ràng.
+    """
+    import asyncio
+
+    try:
+        result = await asyncio.to_thread(
+            rag_pipeline.reason_with_ollama,
+            question=request.question,
+            base_answer=request.base_answer,
+            citations=request.citations,
+            custom_prompt=request.custom_prompt,
+        )
+        return AIReasonResponse(
+            reasoning=result["reasoning"],
+            model=result["model"],
+            evaluated_question=result["evaluated_question"],
+        )
+    except ConnectionError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=str(exc)
+            or "Không thể kết nối Ollama cục bộ tại cổng 11434. Hãy kiểm tra ứng dụng Ollama đang chạy.",
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Không thể kết nối Ollama cục bộ tại cổng 11434. Hãy kiểm tra ứng dụng Ollama đang chạy.",
+        ) from exc
 
 
 def _format_rag_answer_for_messenger(
