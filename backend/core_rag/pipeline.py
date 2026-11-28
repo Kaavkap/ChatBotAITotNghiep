@@ -440,24 +440,187 @@ def clean_latex_to_plain_math(text: str) -> str:
     return out.strip()
 
 
+def _clean_malformed_reasoning_tags(text: str) -> str:
+    """
+    Loại bỏ các dấu backticks và tiền tố/hậu tố thẻ `<reasoning>` bị biến dạng
+    như ```` ```reasoning> ````, ```` ```xml ````, `reasoning>`, `</reasoning>` hoặc ```` ``` ````
+    ở đầu và cuối văn bản để Bước 1 hiển thị sạch sẽ.
+    """
+    if not text:
+        return ""
+    out = text.strip()
+    # Loại bỏ các thẻ/code-fence bị lỗi ở đầu chuỗi (lặp nhiều vòng nếu lồng nhau)
+    for _ in range(3):
+        out = re.sub(
+            r"^\s*(?:```+\s*(?:xml|html|markdown|text)?\s*)?(?:<+\s*reasoning\s*>+|`*\s*reasoning\s*>+|```+\s*(?:xml|html|markdown|text)?)\s*",
+            "",
+            out,
+            flags=re.IGNORECASE,
+        ).strip()
+    # Loại bỏ các thẻ đóng/code-fence ở cuối chuỗi
+    for _ in range(3):
+        out = re.sub(
+            r"\s*(?:<+\s*/?\s*reasoning\s*>+|/\s*reasoning\s*>+|```+)\s*$",
+            "",
+            out,
+            flags=re.IGNORECASE,
+        ).strip()
+    # Xóa mọi thẻ <reasoning>, </reasoning>, ```reasoning> còn sót ở giữa văn bản
+    out = re.sub(
+        r"(?:```+\s*)?<\s*/?\s*reasoning\s*>|(?:^|\s)`*reasoning\s*>",
+        " ",
+        out,
+        flags=re.IGNORECASE,
+    )
+    out = re.sub(r"^`+|`+$", "", out).strip()
+    return out
+
+
+def strip_cjk_leaked_text(text: str) -> str:
+    """
+    Loại bỏ các câu/dòng hoặc ký tự tiếng Trung Quốc (CJK Unified Ideographs `[\\u4e00-\\u9fff]`)
+    bị rò rỉ từ các mô hình đa ngôn ngữ (như Qwen) để giao diện chỉ hiển thị 100% tiếng Việt chuẩn.
+    """
+    if not text:
+        return ""
+    if not re.search(r"[\u4e00-\u9fff]", text):
+        return text
+
+    cleaned_lines: List[str] = []
+    for line in text.splitlines():
+        if not re.search(r"[\u4e00-\u9fff]", line):
+            cleaned_lines.append(line)
+            continue
+        # Tách theo câu trên dòng có chứa ký tự CJK; bỏ các câu thuần CJK, hoặc xóa cụm ký tự CJK khỏi câu tiếng Việt
+        sentences = re.split(r"(?<=[\.\!\?\;\:])\s+", line)
+        kept_sentences: List[str] = []
+        for sent in sentences:
+            if not re.search(r"[\u4e00-\u9fff]", sent):
+                kept_sentences.append(sent)
+            else:
+                # Loại bỏ trực tiếp cụm chữ Hán và dấu câu CJK đi kèm
+                stripped_sent = re.sub(
+                    r"[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]+",
+                    " ",
+                    sent,
+                )
+                stripped_sent = re.sub(r"\s{2,}", " ", stripped_sent).strip(" ,;:-–")
+                # Nếu câu sau khi gỡ CJK vẫn còn từ tiếng Việt có nghĩa (>= 3 từ) thì giữ lại
+                if len(re.findall(r"[a-zA-ZÀ-ỹ]+", stripped_sent)) >= 3:
+                    kept_sentences.append(stripped_sent)
+        if kept_sentences:
+            cleaned_lines.append(" ".join(kept_sentences))
+
+    result = "\n".join(cleaned_lines)
+    result = re.sub(r"[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]+", "", result)
+    result = re.sub(r"[ \t]{2,}", " ", result)
+    return result.strip()
+
+
+def _infer_consistent_verdict_from_reasoning(
+    reasoning_body: str,
+    current_verdict: str,
+) -> str:
+    """
+    Kiểm tra tính nhất quán logic giữa câu kết luận cuối cùng trong `reasoning_body` và `VERDICT`:
+    - Nếu câu kết luận cuối của `reasoning` khẳng định rõ kết quả xảy ra (ví dụ: 'sẽ bị cảnh báo',
+      'bị cảnh báo học vụ', 'bị buộc thôi học', 'bị giảm hạng', 'bị hạ bậc', 'được xếp loại', 'đủ điều kiện')
+      MÀ KHÔNG có từ phủ định ('không bị', 'không được', 'chưa đủ', 'không thuộc diện') -> ép VERDICT thành 'Có'.
+    - Ngược lại, nếu câu kết luận cuối nêu rõ phủ định ('không bị cảnh báo', 'không bị buộc thôi học',
+      'không bị giảm hạng', 'không bị hạ bậc', 'không được xếp loại', 'không đủ điều kiện') -> ép VERDICT thành 'Không'.
+    """
+    if not reasoning_body:
+        return current_verdict
+
+    sentences = [
+        s.strip()
+        for s in re.split(r"[\.\!\?\n\r]+", reasoning_body)
+        if s.strip()
+    ]
+    if not sentences:
+        return current_verdict
+
+    # Xét câu cuối cùng (hoặc 2 câu cuối nếu câu cuối quá ngắn)
+    tail_text = " . ".join(sentences[-2:]) if len(sentences) >= 2 else sentences[-1]
+    last_sentence = sentences[-1]
+
+    negated_pattern = (
+        r"\b(?:không\s+bị|không\s+được|không\s+đủ|chưa\s+đủ|không\s+thuộc\s+diện|"
+        r"không\s+rơi\s+vào|không\s+phải|chưa\s+bị|không\s+thể\s+được)\b"
+    )
+    affirmative_pattern = (
+        r"\b(?:sẽ\s+bị\s+cảnh\s+báo|bị\s+cảnh\s+báo(?:\s+học\s+vụ|\s+kết\s+quả\s+học\s+tập)?|"
+        r"sẽ\s+bị\s+buộc\s+thôi\s+học|bị\s+buộc\s+thôi\s+học|"
+        r"sẽ\s+bị\s+(?:giảm|hạ)\s+(?:hạng|bậc|một\s+mức|01\s+mức|1\s+bậc|01\s+bậc)|"
+        r"bị\s+(?:giảm|hạ)\s+(?:hạng|bậc|một\s+mức|01\s+mức|1\s+bậc|01\s+bậc)|"
+        r"thuộc\s+diện\s+bị\s+(?:cảnh\s+báo|buộc\s+thôi\s+học|giảm\s+hạng|hạ\s+bậc)|"
+        r"được\s+xếp\s+(?:loại|hạng)|đủ\s+điều\s+kiện)\b"
+    )
+
+    # Kiểm tra trực tiếp trên câu kết luận cuối cùng trước
+    for candidate_sent in (last_sentence, tail_text):
+        has_negation = bool(
+            re.search(negated_pattern, candidate_sent, flags=re.IGNORECASE)
+        )
+        has_affirmative = bool(
+            re.search(affirmative_pattern, candidate_sent, flags=re.IGNORECASE)
+        )
+        if has_negation:
+            # Nếu current_verdict đang bắt đầu bằng "Có", đổi sang "Không"
+            if re.match(r"^có\b", current_verdict, flags=re.IGNORECASE):
+                rest = re.sub(
+                    r"^có[\s,.\-–:]*", "", current_verdict, flags=re.IGNORECASE
+                ).strip()
+                return f"Không — {rest}" if rest else "Không"
+            return current_verdict or "Không"
+
+        if has_affirmative and not has_negation:
+            # Nếu current_verdict đang bắt đầu bằng "Không", đổi sang "Có"
+            if re.match(r"^không\b", current_verdict, flags=re.IGNORECASE):
+                rest = re.sub(
+                    r"^không[\s,.\-–:]*", "", current_verdict, flags=re.IGNORECASE
+                ).strip()
+                return f"Có — {rest}" if rest else "Có"
+            return current_verdict or "Có"
+
+    return current_verdict
+
+
 def format_ollama_analytical_output(raw_text: str) -> str:
     """
     Hậu xử lý phản hồi từ Ollama (`/api/chat/ai-reason`):
-    1. Loại bỏ `<think>...</think>` và chuyển đổi mọi LaTeX thô sang toán học chữ thuần (`a/b`, `≈`).
+    1. Loại bỏ `<think>...</think>`, lọc bỏ mọi chữ Hán (CJK) rò rỉ và chuyển đổi LaTeX thô sang toán học chữ thuần (`a/b`, `≈`).
     2. Bóc tách `<reasoning>...</reasoning>`, `VERDICT: Có | Không`, và `ADVICE: ...`
-       (hoặc dùng regex dự phòng nếu mô hình không đóng đúng thẻ XML).
-    3. Luôn lắp ráp kết quả Markdown cuối cùng với **Kết luận trực diện** ở ngay dòng đầu tiên,
+       (hoặc dùng regex dự phòng nếu mô hình không đóng đúng thẻ XML hoặc sinh ```reasoning>).
+    3. Kiểm tra tính nhất quán logic giữa câu kết luận của `reasoning` và `VERDICT` (tránh đảo ngược Có/Không ở câu hỏi "có bị cảnh báo/buộc thôi học/giảm hạng không?").
+    4. Luôn lắp ráp kết quả Markdown cuối cùng với **Kết luận trực diện** ở ngay dòng đầu tiên,
        tiếp theo là **Bước 1 (Đối chiếu & Tính toán)** và **Bước 2 (Khuyến nghị học vụ)**,
        đảm bảo không bao giờ bị lặp hai mục "Kết luận".
     """
-    cleaned = clean_latex_to_plain_math(strip_think_reasoning_tags(raw_text))
+    cleaned = strip_cjk_leaked_text(
+        clean_latex_to_plain_math(strip_think_reasoning_tags(raw_text))
+    )
     if not cleaned:
         return ""
+
+    # Chuẩn hóa sớm các dạng thẻ mở/đóng <reasoning> bị lỗi như ```reasoning>, <reasoning, reasoning> ở đầu dòng
+    normalized_xml = re.sub(
+        r"(?:```+\s*(?:xml\s*)?)?<\s*reasoning\s*>|(?:^|\n)\s*`{0,3}\s*reasoning\s*>",
+        "\n<reasoning>\n",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    normalized_xml = re.sub(
+        r"<\s*/\s*reasoning\s*>(?:\s*```+)?",
+        "\n</reasoning>\n",
+        normalized_xml,
+        flags=re.IGNORECASE,
+    )
 
     # 1. Trích xuất khối <reasoning>...</reasoning>
     reasoning_match = re.search(
         r"<reasoning>\s*(.*?)\s*</reasoning>",
-        cleaned,
+        normalized_xml,
         flags=re.DOTALL | re.IGNORECASE,
     )
     reasoning_body = reasoning_match.group(1).strip() if reasoning_match else ""
@@ -467,15 +630,13 @@ def format_ollama_analytical_output(raw_text: str) -> str:
         re.sub(
             r"<reasoning>.*?</reasoning>",
             "",
-            cleaned,
+            normalized_xml,
             flags=re.DOTALL | re.IGNORECASE,
         ).strip()
         if reasoning_match
-        else cleaned
+        else normalized_xml
     )
-    outside_reasoning = re.sub(
-        r"</?reasoning>", "", outside_reasoning, flags=re.IGNORECASE
-    ).strip()
+    outside_reasoning = _clean_malformed_reasoning_tags(outside_reasoning)
 
     # 2. Trích xuất VERDICT (ưu tiên dòng VERDICT: ..., sau đó đến Bước 2 / Kết luận)
     verdict_match = re.search(
@@ -566,16 +727,27 @@ def format_ollama_analytical_output(raw_text: str) -> str:
         advice_body,
         flags=re.IGNORECASE,
     ).strip()
-    advice_body = re.sub(r"</?reasoning>", "", advice_body, flags=re.IGNORECASE).strip()
-    reasoning_body = re.sub(r"</?reasoning>", "", reasoning_body, flags=re.IGNORECASE).strip()
-    raw_verdict = re.sub(r"</?reasoning>", "", raw_verdict, flags=re.IGNORECASE).strip()
+    advice_body = _clean_malformed_reasoning_tags(advice_body)
+    reasoning_body = _clean_malformed_reasoning_tags(reasoning_body)
+    # Làm sạch lần nữa nếu sau khi gỡ ```reasoning> xuất hiện nhãn "Bước 1 (...):" ở đầu
+    reasoning_body = re.sub(
+        r"^\s*[-*•]?\s*\*{0,2}Bước\s*1\s*\(?Đối\s*chiếu\s*(?:&|và)\s*Tính\s*toán\)?\*{0,2}\s*[:\-–]?\*{0,2}\s*",
+        "",
+        reasoning_body,
+        flags=re.IGNORECASE,
+    ).strip()
+    raw_verdict = _clean_malformed_reasoning_tags(raw_verdict)
 
     # Chuẩn hóa giá trị Kết luận trực diện (Có / Không kèm giải thích ngắn nếu có)
     raw_verdict_clean = re.sub(r"^\*{1,2}|\*{1,2}$", "", raw_verdict).strip()
+    raw_verdict_clean = _infer_consistent_verdict_from_reasoning(
+        reasoning_body=reasoning_body,
+        current_verdict=raw_verdict_clean,
+    )
     if not raw_verdict_clean:
         # Suy luận từ nội dung nếu mô hình quên dòng VERDICT
         if re.search(
-            r"\b(?:không\s+được|không\s+đủ|bị\s+hạ|bị\s+giảm|bị\s+cảnh\s+báo|vượt\s+quá|vi\s+phạm)\b",
+            r"\b(?:không\s+bị|không\s+được|không\s+đủ|chưa\s+đủ|không\s+thuộc\s+diện)\b",
             reasoning_body,
             flags=re.IGNORECASE,
         ):
@@ -607,7 +779,7 @@ def format_ollama_analytical_output(raw_text: str) -> str:
         f"- **Bước 1 (Đối chiếu & Tính toán):** {reasoning_body}\n"
         f"- **Bước 2 (Khuyến nghị học vụ):** {advice_body}"
     )
-    return clean_latex_to_plain_math(assembled)
+    return strip_cjk_leaked_text(clean_latex_to_plain_math(assembled))
 
 
 def clean_citation_quote_unicode(text: str, is_table: bool = False) -> str:
@@ -1220,8 +1392,71 @@ class AcademicRAGPipeline:
         api_key = (settings.openai_api_key or "ollama").strip()
         model_name = (settings.llm_model or "qwen2.5:3b").strip()
 
+        target_scenario = (custom_prompt or "").strip()
+
+        # Khi người dùng nhập câu hỏi tình huống mới (`custom_prompt`), thực hiện truy vấn Hybrid Search + Re-rank
+        # trên chính `custom_prompt` để lấy các điều khoản liên quan trực tiếp (ví dụ: hỏi về "cảnh báo học vụ" Điều 23
+        # ngay dưới tin nhắn về "xếp hạng tốt nghiệp" Điều 28), sau đó ưu tiên ghép lên đầu danh sách citations.
+        effective_citations: List[Dict[str, Any]] = []
+        seen_citation_keys: set[str] = set()
+        effective_base_answer = base_answer
+
+        if target_scenario:
+            try:
+                follow_up_expanded = self.generate_multi_queries(target_scenario)
+                follow_up_candidates = self.multi_query_hybrid_retrieve(
+                    user_query=target_scenario,
+                    expanded_queries=follow_up_expanded,
+                    per_query_top_k=6,
+                    alpha=0.5,
+                )
+                if follow_up_candidates:
+                    follow_up_reranked = self.reranker.rerank(
+                        query=target_scenario,
+                        candidates=follow_up_candidates,
+                        top_n=5,
+                        expanded_queries=follow_up_expanded,
+                    )
+                    follow_up_synthesized = self._synthesize_academic_response(
+                        question=target_scenario,
+                        retrieved=follow_up_reranked,
+                        expanded_queries=follow_up_expanded,
+                    )
+                    if follow_up_synthesized.answer:
+                        effective_base_answer = (
+                            f"{follow_up_synthesized.answer}\n\n"
+                            f"--- Nội dung tham khảo từ câu trả lời trước ---\n{base_answer}"
+                            if base_answer
+                            else follow_up_synthesized.answer
+                        )
+                    for cit_item in follow_up_synthesized.citations:
+                        cit_dict = (
+                            cit_item.model_dump()
+                            if hasattr(cit_item, "model_dump")
+                            else dict(cit_item)
+                        )
+                        dedup_key = (
+                            f"{cit_dict.get('document_name') or cit_dict.get('source_file')}|"
+                            f"{cit_dict.get('article')}|{cit_dict.get('clause')}|{cit_dict.get('page_number')}"
+                        )
+                        if dedup_key not in seen_citation_keys:
+                            seen_citation_keys.add(dedup_key)
+                            effective_citations.append(cit_dict)
+            except Exception as retrieve_exc:
+                print(f"[!] Cảnh báo truy xuất bổ sung cho custom_prompt ({retrieve_exc})")
+
+        for cit in citations or []:
+            cit_dict = cit.model_dump() if hasattr(cit, "model_dump") else dict(cit)
+            dedup_key = (
+                f"{cit_dict.get('document_name') or cit_dict.get('source_file')}|"
+                f"{cit_dict.get('article')}|{cit_dict.get('clause')}|{cit_dict.get('page_number')}"
+            )
+            if dedup_key not in seen_citation_keys:
+                seen_citation_keys.add(dedup_key)
+                effective_citations.append(cit_dict)
+
         citation_blocks: List[str] = []
-        for idx, cit in enumerate(citations or [], start=1):
+        for idx, cit in enumerate(effective_citations[:8], start=1):
             doc_title = cit.get("doc_title") or cit.get("document_name") or "Quy chế TDMU"
             issue_year = cit.get("issue_year") or ""
             article = cit.get("article") or ""
@@ -1239,9 +1474,8 @@ class AcademicRAGPipeline:
             else "Sử dụng nội dung tổng hợp quy chế bên dưới để đối chiếu."
         )
 
-        target_scenario = (custom_prompt or "").strip()
         effective_question = (
-            f"Câu hỏi gốc: {question}\nTình huống / Câu hỏi suy luận cụ thể của sinh viên: {target_scenario}"
+            f"Câu hỏi / Tình huống cụ thể cần phân tích của sinh viên: {target_scenario}\n(Ngữ cảnh câu hỏi trước đó: {question})"
             if target_scenario
             else f"Câu hỏi cần phân tích & kết luận Có/Không hoặc giải thích chi tiết: {question}"
         )
@@ -1253,17 +1487,18 @@ class AcademicRAGPipeline:
             "2. Thực hiện đối chiếu số liệu và tính toán từng bước TRƯỚC KHI đưa ra kết luận Có/Không, theo đúng định dạng đầu ra bắt buộc sau đây:\n"
             "   - Đầu tiên, viết toàn bộ phần đối chiếu điều khoản và phép tính số học vào bên trong cặp thẻ `<reasoning>...</reasoning>`.\n"
             "     + QUY TẮC TOÁN HỌC BẮT BUỘC: Chỉ sử dụng chữ thuần dễ đọc như `7 / 120 = 5,83% > 5%` hoặc `120 × 5% = 6 tín chỉ`. TUYỆT ĐỐI KHÔNG dùng ký hiệu LaTeX như `\\frac`, `\\(`, `\\)`, `\\[`, `\\]` hay `\\approx`.\n"
-            "     + Trong thẻ `<reasoning>`, chỉ đối chiếu và tính toán, chưa viết dòng VERDICT.\n"
-            "   - Ngay sau thẻ `</reasoning>`, xuống dòng và xuất đúng dòng:\n"
-            "     `VERDICT: Không` (nếu sinh viên vi phạm bất kỳ điều kiện nào, vượt ngưỡng giới hạn 5%, bị hạ bậc, bị cảnh báo hoặc không đủ điều kiện) HOẶC `VERDICT: Có` (chỉ khi thỏa mãn đầy đủ tất cả điều kiện).\n"
+            "     + Trong thẻ `<reasoning>`, chỉ đối chiếu và tính toán, kết thúc bằng 1 câu khẳng định rõ kết quả đối với câu hỏi của sinh viên, chưa viết dòng VERDICT.\n"
+            "   - Ngay sau thẻ `</reasoning>`, xuống dòng và xuất đúng dòng `VERDICT: Có` hoặc `VERDICT: Không`.\n"
+            "     + QUY TẮC VERDICT BẮT BUỘC: `VERDICT` phải trả lời TRỰC TIẾP đúng câu hỏi tiếng Việt của người dùng:\n"
+            "       * Nếu người dùng hỏi dạng sự kiện bất lợi ('có bị cảnh báo học vụ không?', 'có bị buộc thôi học không?', 'có bị giảm hạng không?') và kết quả ở `<reasoning>` cho thấy sinh viên RƠI VÀO điều kiện bị cảnh báo / buộc thôi học / giảm hạng, BẮT BUỘC ghi `VERDICT: Có`. Chỉ ghi `VERDICT: Không` khi sinh viên an toàn và KHÔNG bị xử lý.\n"
+            "       * Nếu người dùng hỏi dạng điều kiện đạt ('có được xếp loại Giỏi không?', 'có đủ điều kiện học bổng/tốt nghiệp không?'), ghi `VERDICT: Có` khi đạt đủ mọi điều kiện và ghi `VERDICT: Không` khi bị hạ bậc hoặc không đạt.\n"
             "   - Ngay dòng tiếp theo, xuất đúng dòng:\n"
             "     `ADVICE: <ghi chú khuyến nghị học vụ ngắn gọn, hướng dẫn bước tiếp theo hoặc liên hệ Phòng Đào tạo Đại học / Phòng Công tác Sinh viên TDMU>`.\n"
-            "3. TUYỆT ĐỐI KHÔNG xuất thông báo từ chối 'ngoài phạm vi dữ liệu' khi đã có trích dẫn quy chế đi kèm. "
-            "Trình bày hoàn toàn bằng tiếng Việt chuẩn mực, rõ ràng, súc tích."
+            "3. QUY TẮC NGÔN NGỮ BẮT BUỘC: CHỈ trả lời 100% bằng tiếng Việt, tuyệt đối KHÔNG dùng tiếng Trung Quốc hay tiếng Anh. TUYỆT ĐỐI KHÔNG xuất thông báo từ chối 'ngoài phạm vi dữ liệu' khi đã có trích dẫn quy chế đi kèm."
         )
 
         analytical_user_prompt = (
-            f"[NỘI DUNG QUY CHẾ ĐÃ TRÍCH XUẤT]:\n{base_answer}\n\n"
+            f"[NỘI DUNG QUY CHẾ ĐÃ TRÍCH XUẤT]:\n{effective_base_answer}\n\n"
             f"[CÁC TRÍCH DẪN ĐIỀU KHOẢN GỐC TDMU]:\n{citations_context}\n\n"
             f"[YÊU CẦU PHÂN TÍCH TÌNH HUỐNG]:\n{effective_question}"
         )
